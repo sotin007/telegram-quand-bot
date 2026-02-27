@@ -1,4 +1,5 @@
 # === TELEGRAM QUAND BOT ===
+# VERSION 2
 import os
 import time
 import textwrap
