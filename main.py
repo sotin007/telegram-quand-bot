@@ -1,6 +1,5 @@
 import os
 import time
-import math
 import textwrap
 from io import BytesIO
 from dataclasses import dataclass, field
@@ -10,19 +9,22 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# ===== SETTINGS =====
 TOKEN = os.environ.get("BOT_TOKEN", "")
 COOLDOWN_SECONDS = int(os.environ.get("COOLDOWN_SECONDS", "5"))
 
+# ===== STATE =====
 last_used: Dict[Tuple[int, int], float] = {}
 
 @dataclass
 class VoteState:
     up: int = 0
     down: int = 0
-    voters: Dict[int, int] = field(default_factory=dict)
+    voters: Dict[int, int] = field(default_factory=dict)  # user_id -> 1/-1
 
 votes: Dict[int, VoteState] = {}
 
+# ===== UI =====
 def keyboard(poll_id: int, up: int, down: int):
     return InlineKeyboardMarkup([
         [
@@ -40,8 +42,7 @@ def extract_text(m) -> str:
         return ""
     return t
 
-def load_font(size: int) -> ImageFont.FreeTypeFont:
-    # DejaVuSans обычно есть на Linux/railway
+def load_font(size: int):
     try:
         return ImageFont.truetype("DejaVuSans.ttf", size)
     except:
@@ -57,8 +58,7 @@ def circle_crop(img: Image.Image, size: int) -> Image.Image:
     out.paste(img, (0, 0), mask)
     return out
 
-def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
-    # перенос по словам, чтобы влезло по ширине
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
     words = text.split()
     if not words:
         return ""
@@ -66,7 +66,7 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
     cur = ""
     for w in words:
         test = (cur + " " + w).strip()
-        bbox = draw.textbbox((0,0), test, font=font)
+        bbox = draw.textbbox((0, 0), test, font=font)
         if (bbox[2] - bbox[0]) <= max_width:
             cur = test
         else:
@@ -77,82 +77,106 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
         lines.append(cur)
     return "\n".join(lines)
 
-def render_quote(author: str, text: str, avatar: Optional[Image.Image]) -> BytesIO:
-    W = 720
-    padding = 36
-    bubble_radius = 42
-    avatar_size = 84
-    gap = 18
+def render_quote_sticker(author: str, text: str, avatar: Optional[Image.Image]) -> Image.Image:
+    """
+    Возвращает RGBA 512x512 (под требования статического стикера).
+    """
+    W = H = 512
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))  # прозрачный фон
+    draw = ImageDraw.Draw(img)
 
-    # фон (тёмный как в твоём чате)
-    bg = Image.new("RGB", (W, 600), (18, 18, 18))
-    draw = ImageDraw.Draw(bg)
-
-    # шрифты
-    name_font = load_font(34)
-    text_font = load_font(36)
-
-    # зона текста (справа от аватарки)
-    text_x = padding + avatar_size + gap
-    max_text_width = W - text_x - padding
-
-    # перенос текста
-    wrapped = wrap_text(draw, text, text_font, max_text_width)
-    if len(wrapped) > 900:
-        wrapped = wrapped[:900] + "…"
-
-    # размеры имени/текста
-    name_bbox = draw.textbbox((0,0), author, font=name_font)
-    name_h = name_bbox[3] - name_bbox[1]
-
-    text_bbox = draw.multiline_textbbox((0,0), wrapped, font=text_font, spacing=10)
-    text_h = text_bbox[3] - text_bbox[1]
-
-    bubble_h = padding + name_h + 14 + text_h + padding
-    bubble_w = W - 2*padding
-    H = bubble_h + 2*padding
-
-    bg = Image.new("RGB", (W, H), (18, 18, 18))
-    draw = ImageDraw.Draw(bg)
+    pad = 28
+    bubble_radius = 44
+    avatar_size = 72
+    gap = 16
 
     # bubble
-    bubble_x1 = padding
-    bubble_y1 = padding
-    bubble_x2 = padding + bubble_w
-    bubble_y2 = padding + bubble_h
-
-    bubble = Image.new("RGBA", (bubble_w, bubble_h), (0,0,0,0))
+    bubble = Image.new("RGBA", (W - 2 * pad, H - 2 * pad), (0, 0, 0, 0))
     bd = ImageDraw.Draw(bubble)
-    bd.rounded_rectangle((0,0,bubble_w,bubble_h), radius=bubble_radius, fill=(40, 40, 40, 255))
+    bd.rounded_rectangle(
+        (0, 0, bubble.size[0], bubble.size[1]),
+        radius=bubble_radius,
+        fill=(40, 40, 40, 235),
+    )
+    img.paste(bubble, (pad, pad), bubble)
 
-    bg.paste(bubble, (bubble_x1, bubble_y1), bubble)
+    # fonts
+    name_font = load_font(28)
+    # текстовый шрифт будем подбирать по размеру
+    text_font_size = 34
 
-    # аватар
+    # зоны
+    text_x = pad + 18 + avatar_size + gap
+    max_text_w = W - text_x - pad - 18
+
+    # avatar
     if avatar is not None:
         av = circle_crop(avatar, avatar_size)
-        bg.paste(av, (padding + 18, padding + 18), av)
+        img.paste(av, (pad + 18, pad + 18), av)
     else:
-        # заглушка кружок
-        tmp = Image.new("RGBA", (avatar_size, avatar_size), (0,0,0,0))
-        td = ImageDraw.Draw(tmp)
-        td.ellipse((0,0,avatar_size,avatar_size), fill=(90,90,90,255))
-        bg.paste(tmp, (padding + 18, padding + 18), tmp)
+        ph = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+        pd = ImageDraw.Draw(ph)
+        pd.ellipse((0, 0, avatar_size, avatar_size), fill=(90, 90, 90, 255))
+        img.paste(ph, (pad + 18, pad + 18), ph)
 
-    # имя + текст
-    name_pos = (text_x, padding + 18)
-    text_pos = (text_x, padding + 18 + name_h + 14)
+    # имя
+    draw.text((text_x, pad + 14), author, font=name_font, fill=(180, 210, 255, 255))
 
-    draw.text(name_pos, author, font=name_font, fill=(180, 210, 255))
-    draw.multiline_text(text_pos, wrapped, font=text_font, fill=(240, 240, 240), spacing=10)
+    # подбор размера шрифта для текста, чтобы влезло по высоте
+    available_h = (H - pad - 18) - (pad + 14 + 34 + 18)  # грубо, но стабильно
 
+    best_font = None
+    best_wrapped = None
+    for fs in range(text_font_size, 18, -2):
+        f = load_font(fs)
+        wrapped = wrap_text(draw, text, f, max_text_w)
+        bbox = draw.multiline_textbbox((0, 0), wrapped, font=f, spacing=8)
+        th = bbox[3] - bbox[1]
+        if th <= available_h:
+            best_font = f
+            best_wrapped = wrapped
+            break
+
+    if best_font is None:
+        best_font = load_font(18)
+        best_wrapped = wrap_text(draw, text[:240] + "…", best_font, max_text_w)
+
+    # текст
+    text_y = pad + 14 + 34 + 14
+    draw.multiline_text(
+        (text_x, text_y),
+        best_wrapped,
+        font=best_font,
+        fill=(245, 245, 245, 255),
+        spacing=8
+    )
+
+    return img
+
+def to_webp_sticker(img: Image.Image) -> BytesIO:
+    """
+    Конвертит в WEBP для Telegram sticker.
+    Стараемся уложиться в лимиты (обычно <=512KB).
+    """
     bio = BytesIO()
-    bio.name = "quand.png"
-    bg.save(bio, "PNG", optimize=True)
+    bio.name = "quand.webp"
+
+    # Понижаем качество если надо, чтобы уменьшить вес.
+    # lossless=True иногда делает файл слишком большим — поэтому используем quality.
+    for q in (90, 80, 70, 60, 50):
+        bio.seek(0)
+        bio.truncate(0)
+        img.save(bio, format="WEBP", quality=q, method=6)
+        size = bio.tell()
+        if size <= 480 * 1024:  # запас под лимиты
+            break
+
     bio.seek(0)
     return bio
 
+# ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Reply на сообщение → /quand (сделаю quote-стикер + голосование)")
+    await update.message.reply_text("Reply на сообщение → /quand (сделаю СТИКЕР + голосование)")
 
 async def quand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -162,8 +186,7 @@ async def quand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # cooldown
     key = (chat.id, user.id)
     now = time.time()
-    last = last_used.get(key, 0.0)
-    if now - last < COOLDOWN_SECONDS:
+    if now - last_used.get(key, 0.0) < COOLDOWN_SECONDS:
         await msg.reply_text("Подожди чуть-чуть 🙂")
         return
     last_used[key] = now
@@ -179,7 +202,7 @@ async def quand(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     author = msg.reply_to_message.from_user.full_name if msg.reply_to_message.from_user else "Unknown"
 
-    # пытаемся получить аватар автора
+    # avatar
     avatar_img = None
     try:
         uid = msg.reply_to_message.from_user.id
@@ -192,16 +215,23 @@ async def quand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         avatar_img = None
 
-    image_bio = render_quote(author, text, avatar_img)
-    sent = await msg.reply_photo(photo=image_bio)
+    try:
+        sticker_img = render_quote_sticker(author, text, avatar_img)
+        webp = to_webp_sticker(sticker_img)
 
-    poll = await context.bot.send_message(
-        chat_id=chat.id,
-        text="Голосование: 👍 0 | 👎 0",
-        reply_to_message_id=sent.message_id
-    )
-    votes[poll.message_id] = VoteState()
-    await poll.edit_reply_markup(reply_markup=keyboard(poll.message_id, 0, 0))
+        sent_sticker = await msg.reply_sticker(sticker=webp)
+
+        poll = await context.bot.send_message(
+            chat_id=chat.id,
+            text="Голосование: 👍 0 | 👎 0",
+            reply_to_message_id=sent_sticker.message_id
+        )
+        votes[poll.message_id] = VoteState()
+        await poll.edit_reply_markup(reply_markup=keyboard(poll.message_id, 0, 0))
+
+    except Exception as e:
+        # Если WEBP не поддерживается окружением — увидишь это сообщением
+        await msg.reply_text(f"Ошибка при создании стикера: {type(e).__name__}\nОткрой Railway Logs — скажу точный фикс.")
 
 async def vote_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
