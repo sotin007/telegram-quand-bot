@@ -1,15 +1,28 @@
 import os
+import json
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import feedparser
+from typing import List
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+)
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
-    MessageHandler, filters
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-# ===== ТВОИ ПРАВИЛА =====
+# ===== MOD SETTINGS =====
 RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
     "🤩🥺Наши правила:🥺🤩\n"
@@ -18,13 +31,21 @@ RULES_TEXT = (
 )
 WELCOME_TEXT = "👋 {mention}\n\n" + RULES_TEXT
 
-DELETE_QRAND_AFTER_SECONDS = 5
 DELETE_WELCOME_AFTER_SECONDS = 30
+DELETE_QRAND_AFTER_SECONDS = 5
 
-# ===== УТИЛИТЫ =====
+# ===== RSS -> CHANNEL SETTINGS =====
+RSS_URL = os.environ.get("RSS_URL", "").strip()
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # @yomabar
+RSS_POLL_SECONDS = int(os.environ.get("RSS_POLL_SECONDS", "120"))
+RSS_STATE_FILE = "rss_state.json"
+
+
+# ---------- helpers ----------
 def mention_html(user) -> str:
     name = (user.full_name or "пользователь").replace("<", "").replace(">", "")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
+
 
 async def delete_later(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: int):
     await asyncio.sleep(delay)
@@ -33,6 +54,7 @@ async def delete_later(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message
     except:
         pass
 
+
 async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         m = await context.bot.get_chat_member(chat_id, user_id)
@@ -40,21 +62,102 @@ async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYP
     except:
         return False
 
-# ===== БАЗА =====
+
+def load_state() -> dict:
+    if os.path.exists(RSS_STATE_FILE):
+        try:
+            with open(RSS_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
+def save_state(state: dict):
+    try:
+        with open(RSS_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+
+def entry_id(e) -> str:
+    return getattr(e, "id", "") or getattr(e, "guid", "") or getattr(e, "link", "") or ""
+
+
+def entry_link(e) -> str:
+    return getattr(e, "link", "") or ""
+
+
+def entry_caption(e) -> str:
+    for k in ("title", "summary", "description"):
+        v = getattr(e, k, "")
+        if v:
+            return v
+    return ""
+
+
+def entry_images(e) -> List[str]:
+    urls = []
+
+    mc = getattr(e, "media_content", None)
+    if mc:
+        for m in mc:
+            u = m.get("url")
+            if u:
+                urls.append(u)
+
+    mt = getattr(e, "media_thumbnail", None)
+    if mt:
+        for m in mt:
+            u = m.get("url")
+            if u:
+                urls.append(u)
+
+    enc = getattr(e, "enclosures", None)
+    if enc:
+        for it in enc:
+            u = it.get("href") or it.get("url")
+            if u:
+                urls.append(u)
+
+    # dedupe
+    out = []
+    seen = set()
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out[:10]
+
+
+# ---------- commands ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "Я мод-бот.\n"
+        "Я мод-бот + постинг из Instagram RSS.\n"
         "✅ Приветствие+правила (удаляю через 30 сек)\n"
-        "✅ Кнопка бана на вышедших\n"
+        "✅ Кнопка бана на ушедших\n"
         "✅ /qrand удаляю через 5 сек\n"
-        "✅ Титулы: /nick <до 16 символов>, /unnick\n\n"
-        "Команда: /rules"
+        "✅ RSS -> канал\n\n"
+        "Команды: /rules, /rssstatus"
     )
+
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(RULES_TEXT)
 
-# ===== ПРИВЕТСТВИЕ =====
+
+async def rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = context.application.bot_data.get("rss_state") or load_state()
+    await update.effective_message.reply_text(
+        f"RSS_URL: {'✅' if RSS_URL else '❌'}\n"
+        f"CHANNEL_ID: {CHANNEL_ID or '❌'}\n"
+        f"poll: {RSS_POLL_SECONDS}s\n"
+        f"last_id: {st.get('last_id', '') or '(пусто)'}"
+    )
+
+
+# ---------- welcome / left ----------
 async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.new_chat_members:
@@ -70,7 +173,7 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delete_later(context, sent.chat_id, sent.message_id, DELETE_WELCOME_AFTER_SECONDS)
         )
 
-# ===== УШЁЛ: КНОПКА БАН =====
+
 async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.left_chat_member:
@@ -85,6 +188,7 @@ async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 {left.full_name} вышел(ла) из чата.\nЕсли это спамер — можно забанить.",
         reply_markup=kb
     )
+
 
 async def on_ban_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -109,13 +213,14 @@ async def on_ban_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await q.message.edit_text(f"❌ Не смог забанить. Проверь права бота.\n{type(e).__name__}")
 
-# ===== АНТИ /qrand =====
+
+# ---------- anti /qrand ----------
 async def on_qrand_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not (msg.text or msg.caption):
         return
-
     txt = (msg.text or msg.caption or "").strip()
+
     if not (txt.startswith("/qrand") or txt.startswith("/qrand@")):
         return
 
@@ -123,112 +228,80 @@ async def on_qrand_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         delete_later(context, msg.chat_id, msg.message_id, DELETE_QRAND_AFTER_SECONDS)
     )
 
-# ===== /nick = CUSTOM ADMIN TITLE =====
-async def nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /nick Невеста ⚡ -> делает автора админом с минимумом прав и ставит custom title
-    """
-    msg = update.effective_message
-    chat = update.effective_chat
-    user = update.effective_user
 
-    if not chat or chat.type != "supergroup":
-        await msg.reply_text("❌ /nick работает только в супергруппе (не в обычной группе).")
+# ---------- RSS job ----------
+async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
+    if not RSS_URL or not CHANNEL_ID:
         return
 
-    if not context.args:
-        await msg.reply_text("Использование: /nick ТвойНик (до 16 символов)")
+    state = context.application.bot_data.setdefault("rss_state", load_state())
+    last_id = state.get("last_id", "")
+
+    feed = feedparser.parse(RSS_URL)
+    entries = getattr(feed, "entries", []) or []
+    if not entries:
         return
 
-    title = " ".join(context.args).strip()
-    if len(title) > 16:
-        await msg.reply_text("❌ Ник слишком длинный. Максимум 16 символов.")
+    new_entries = []
+    for e in entries:
+        eid = entry_id(e)
+        if not eid:
+            continue
+        if eid == last_id:
+            break
+        new_entries.append(e)
+
+    if not new_entries:
         return
 
-    # Проверим, что бот админ
-    me = await context.bot.get_me()
-    if not await is_admin(chat.id, me.id, context):
-        await msg.reply_text("❌ Сделай бота админом с правом 'Добавлять администраторов'.")
-        return
+    new_entries.reverse()  # старые -> новые
 
-    try:
-        # Повышаем (минимально), чтобы был админ и можно было поставить title
-        await context.bot.promote_chat_member(
-            chat_id=chat.id,
-            user_id=user.id,
-            can_manage_chat=True,          # минимум
-            can_delete_messages=False,
-            can_restrict_members=False,
-            can_promote_members=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-            can_manage_video_chats=False,
-            can_manage_topics=False,
-        )
+    for e in new_entries:
+        eid = entry_id(e)
+        link = entry_link(e)
+        caption = (entry_caption(e) or "").strip()
+        if link:
+            caption = (caption + "\n\n" + link).strip()
 
-        # Ставим кастомный титул
-        await context.bot.set_chat_administrator_custom_title(
-            chat_id=chat.id,
-            user_id=user.id,
-            custom_title=title
-        )
+        imgs = entry_images(e)
 
-        await msg.reply_text(f"✅ Ник установлен: {title}")
+        try:
+            if imgs:
+                if len(imgs) > 1:
+                    media = []
+                    for i, url in enumerate(imgs[:10]):
+                        if i == 0 and caption:
+                            media.append(InputMediaPhoto(media=url, caption=caption[:1024]))
+                        else:
+                            media.append(InputMediaPhoto(media=url))
+                    await context.bot.send_media_group(chat_id=CHANNEL_ID, media=media)
+                else:
+                    await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=imgs[0],
+                        caption=caption[:1024] if caption else None
+                    )
+            else:
+                if caption:
+                    await context.bot.send_message(chat_id=CHANNEL_ID, text=caption[:4096])
 
-    except Exception as e:
-        await msg.reply_text(
-            "❌ Не получилось поставить ник.\n"
-            "Проверь:\n"
-            "1) Бот админ и может добавлять админов\n"
-            "2) Это супергруппа\n"
-            "3) Ты не владелец чата (owner)\n"
-            f"\nОшибка: {type(e).__name__}"
-        )
+            state["last_id"] = eid
+            save_state(state)
 
-async def unnick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /unnick -> снять титул (разжаловать)
-    """
-    msg = update.effective_message
-    chat = update.effective_chat
-    user = update.effective_user
+        except:
+            # если конкретный пост не отправился — пропускаем
+            pass
 
-    if not chat or chat.type != "supergroup":
-        await msg.reply_text("❌ /unnick работает только в супергруппе.")
-        return
 
-    try:
-        # Демот: все флаги False
-        await context.bot.promote_chat_member(
-            chat_id=chat.id,
-            user_id=user.id,
-            can_manage_chat=False,
-            can_delete_messages=False,
-            can_restrict_members=False,
-            can_promote_members=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-            can_manage_video_chats=False,
-            can_manage_topics=False,
-        )
-        await msg.reply_text("✅ Ник снят (админство убрано).")
-    except Exception as e:
-        await msg.reply_text(f"❌ Не смог снять. Проверь права бота.\n{type(e).__name__}")
-
-# ===== ЗАПУСК =====
 def main():
     if not TOKEN:
-        raise RuntimeError("BOT_TOKEN не задан. Добавь переменную окружения BOT_TOKEN.")
+        raise RuntimeError("BOT_TOKEN не задан.")
 
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("rules", rules))
-
-    app.add_handler(CommandHandler("nick", nick))
-    app.add_handler(CommandHandler("unnick", unnick))
+    app.add_handler(CommandHandler("rssstatus", rssstatus))
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
@@ -238,7 +311,11 @@ def main():
 
     app.add_handler(CallbackQueryHandler(on_ban_button, pattern=r"^ban:"))
 
+    if RSS_URL and CHANNEL_ID:
+        app.job_queue.run_repeating(rss_tick, interval=RSS_POLL_SECONDS, first=10)
+
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
