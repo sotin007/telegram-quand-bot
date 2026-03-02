@@ -2,8 +2,8 @@ import os
 import json
 import asyncio
 import feedparser
-
 from typing import List
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -19,48 +19,43 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.error import BadRequest
 
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-# ===== НАСТРОЙКИ =====
-
+# ===== MOD SETTINGS =====
 RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
     "🤩🥺Наши правила:🥺🤩\n"
     "😖🤬Без политики! 🤬😣\n"
     "😶‍🌫️🤯😳Не обижать друг друга!😳🤯😶‍🌫️"
 )
-
 WELCOME_TEXT = "👋 {mention}\n\n" + RULES_TEXT
 
 DELETE_WELCOME_AFTER_SECONDS = 30
 DELETE_QRAND_AFTER_SECONDS = 5
 
+# ===== RSS -> CHANNEL SETTINGS =====
 RSS_URL = os.environ.get("RSS_URL", "").strip()
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # @yomabar
 RSS_POLL_SECONDS = int(os.environ.get("RSS_POLL_SECONDS", "120"))
 RSS_STATE_FILE = "rss_state.json"
 
 
-# =======================
-# УТИЛИТЫ
-# =======================
-
+# ---------- helpers ----------
 def mention_html(user) -> str:
     name = (user.full_name or "пользователь").replace("<", "").replace(">", "")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 
-async def delete_later(context, chat_id, message_id, delay):
+async def delete_later(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: int):
     await asyncio.sleep(delay)
     try:
-        await context.bot.delete_message(chat_id, message_id)
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except:
         pass
 
 
-async def is_admin(chat_id, user_id, context):
+async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         m = await context.bot.get_chat_member(chat_id, user_id)
         return m.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
@@ -68,95 +63,101 @@ async def is_admin(chat_id, user_id, context):
         return False
 
 
-def load_state():
+def load_state() -> dict:
     if os.path.exists(RSS_STATE_FILE):
-        with open(RSS_STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(RSS_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
 
-def save_state(state):
-    with open(RSS_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-
-
-# =======================
-# КОМАНДЫ
-# =======================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Я полностью рабочий бот 😎")
-
-
-async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(RULES_TEXT)
-
-
-async def nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("❌ Только в группе.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Использование: /nick ТвойНик")
-        return
-
-    new_nick = " ".join(context.args).strip()
-
-    if len(new_nick) > 16:
-        await update.message.reply_text("❌ Максимум 16 символов.")
-        return
-
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
+def save_state(state: dict):
     try:
-        await context.bot.promote_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            can_manage_chat=False,
-            can_delete_messages=False,
-            can_manage_video_chats=False,
-            can_restrict_members=False,
-            can_promote_members=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-            can_post_stories=False,
-            can_edit_stories=False,
-            can_delete_stories=False,
-        )
-
-        await context.bot.set_chat_administrator_custom_title(
-            chat_id=chat_id,
-            user_id=user_id,
-            custom_title=new_nick
-        )
-
-        await update.message.reply_text(f"✅ Ник установлен: {new_nick}")
-
-    except BadRequest:
-        await update.message.reply_text("❌ Бот должен быть админом с правом менять админов.")
+        with open(RSS_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
 
-async def rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state = context.application.bot_data.get("rss_state", load_state())
-    await update.message.reply_text(
-        f"RSS: {'✅' if RSS_URL else '❌'}\n"
-        f"CHANNEL: {CHANNEL_ID}\n"
-        f"Last ID: {state.get('last_id', '(пусто)')}"
+def entry_id(e) -> str:
+    # берём самое стабильное
+    return e.get("id") or e.get("guid") or e.get("link") or ""
+
+
+def entry_link(e) -> str:
+    return e.get("link") or ""
+
+
+def entry_caption(e) -> str:
+    # RSS.app часто кладёт текст сюда
+    return (e.get("title") or e.get("summary") or "").strip()
+
+
+def entry_images(e) -> List[str]:
+    urls = []
+
+    # media_content / media_thumbnail / enclosures — что найдём
+    for m in (e.get("media_content") or []):
+        u = m.get("url")
+        if u:
+            urls.append(u)
+
+    for m in (e.get("media_thumbnail") or []):
+        u = m.get("url")
+        if u:
+            urls.append(u)
+
+    for m in (e.get("enclosures") or []):
+        u = m.get("href") or m.get("url")
+        if u:
+            urls.append(u)
+
+    # dedupe
+    out = []
+    seen = set()
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+
+    return out[:10]
+
+
+# ---------- commands ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "Я мод-бот + RSS -> канал.\n"
+        "Команды: /rules, /rssstatus"
     )
 
 
-# =======================
-# СОБЫТИЯ
-# =======================
+async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(RULES_TEXT)
 
+
+async def rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = context.application.bot_data.get("rss_state") or load_state()
+    await update.effective_message.reply_text(
+        f"RSS_URL: {'✅' if RSS_URL else '❌'}\n"
+        f"CHANNEL_ID: {CHANNEL_ID or '❌'}\n"
+        f"poll: {RSS_POLL_SECONDS}s\n"
+        f"last_id: {st.get('last_id', '') or '(пусто)'}"
+    )
+
+
+# ---------- welcome / left ----------
 async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for user in update.message.new_chat_members:
-        sent = await update.message.reply_text(
-            WELCOME_TEXT.format(mention=mention_html(user)),
-            parse_mode="HTML"
+    msg = update.effective_message
+    if not msg or not msg.new_chat_members:
+        return
+
+    for u in msg.new_chat_members:
+        sent = await msg.reply_text(
+            WELCOME_TEXT.format(mention=mention_html(u)),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
         context.application.create_task(
             delete_later(context, sent.chat_id, sent.message_id, DELETE_WELCOME_AFTER_SECONDS)
@@ -164,91 +165,160 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.left_chat_member
+    msg = update.effective_message
+    if not msg or not msg.left_chat_member:
+        return
 
+    left = msg.left_chat_member
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"🚫 Забанить {user.full_name}",
-            callback_data=f"ban:{user.id}"
-        )
+        InlineKeyboardButton(f"🚫 Забанить {left.full_name}", callback_data=f"ban:{left.id}")
     ]])
 
-    await update.message.reply_text(
-        f"{user.full_name} вышел из чата.",
+    await msg.reply_text(
+        f"👋 {left.full_name} вышел(ла) из чата.\nЕсли это спамер — можно забанить.",
         reply_markup=kb
     )
 
 
 async def on_ban_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    if not await is_admin(query.message.chat_id, query.from_user.id, context):
-        await query.answer("Только админ.", show_alert=True)
+    chat_id = q.message.chat_id
+    clicker_id = q.from_user.id
+
+    if not await is_admin(chat_id, clicker_id, context):
+        await q.answer("Только админы могут банить.", show_alert=True)
         return
 
-    user_id = int(query.data.split(":")[1])
-    await context.bot.ban_chat_member(query.message.chat_id, user_id)
-    await query.message.edit_text("✅ Забанен.")
+    try:
+        target_id = int((q.data or "").split("ban:", 1)[1])
+    except:
+        await q.answer("Ошибка кнопки.", show_alert=True)
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat_id=chat_id, user_id=target_id)
+        await q.message.edit_text("✅ Забанен.")
+    except Exception as e:
+        await q.message.edit_text(f"❌ Не смог забанить. Проверь права бота.\n{type(e).__name__}")
 
 
-async def on_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-    if text.startswith("/qrand"):
-        context.application.create_task(
-            delete_later(context, update.message.chat_id, update.message.message_id, DELETE_QRAND_AFTER_SECONDS)
-        )
+# ---------- anti /qrand ----------
+async def on_qrand_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg or not (msg.text or msg.caption):
+        return
+
+    txt = (msg.text or msg.caption or "").strip()
+    if not (txt.startswith("/qrand") or txt.startswith("/qrand@")):
+        return
+
+    context.application.create_task(
+        delete_later(context, msg.chat_id, msg.message_id, DELETE_QRAND_AFTER_SECONDS)
+    )
 
 
-# =======================
-# RSS JOB
-# =======================
-
+# ---------- RSS job (FIXED) ----------
 async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
     if not RSS_URL or not CHANNEL_ID:
         return
 
     state = context.application.bot_data.setdefault("rss_state", load_state())
-    last_id = state.get("last_id")
+    last_id = state.get("last_id", "")
 
     feed = feedparser.parse(RSS_URL)
+    entries = getattr(feed, "entries", []) or []
+    if not entries:
+        return
 
-    for entry in reversed(feed.entries):
-        entry_id = entry.get("id") or entry.get("link")
-        if entry_id == last_id:
+    # Если первый запуск (last_id пустой) — НЕ спамим старьём.
+    # Просто запоминаем самый свежий и ждём новые.
+    if not last_id:
+        newest = entry_id(entries[0])  # обычно самый свежий
+        if newest:
+            state["last_id"] = newest
+            save_state(state)
+        return
+
+    # Собираем только новые, пока не дошли до last_id
+    new_entries = []
+    for e in entries:
+        eid = entry_id(e)
+        if not eid:
             continue
+        if eid == last_id:
+            break
+        new_entries.append(e)
 
-        caption = (entry.get("title", "") + "\n\n" + entry.get("link", "")).strip()
+    if not new_entries:
+        return
+
+    # Постим в правильном порядке: старые -> новые
+    new_entries.reverse()
+
+    for e in new_entries:
+        eid = entry_id(e)
+        link = entry_link(e)
+        caption = entry_caption(e)
+
+        text = caption
+        if link:
+            text = (text + "\n\n" + link).strip()
+
+        imgs = entry_images(e)
 
         try:
-            await context.bot.send_message(CHANNEL_ID, caption)
-            state["last_id"] = entry_id
+            if imgs:
+                if len(imgs) > 1:
+                    media = []
+                    for i, url in enumerate(imgs[:10]):
+                        if i == 0 and text:
+                            media.append(InputMediaPhoto(media=url, caption=text[:1024]))
+                        else:
+                            media.append(InputMediaPhoto(media=url))
+                    await context.bot.send_media_group(chat_id=CHANNEL_ID, media=media)
+                else:
+                    await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=imgs[0],
+                        caption=text[:1024] if text else None
+                    )
+            else:
+                if text:
+                    await context.bot.send_message(chat_id=CHANNEL_ID, text=text[:4096])
+
+            # После успешной попытки обновляем last_id на текущий
+            state["last_id"] = eid
             save_state(state)
+
         except:
+            # если конкретный пост не отправился — пропускаем
             pass
 
 
-# =======================
-# MAIN
-# =======================
-
 def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан.")
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("rules", rules))
-    app.add_handler(CommandHandler("nick", nick))
     app.add_handler(CommandHandler("rssstatus", rssstatus))
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
-    app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, on_qrand))
-    app.add_handler(CallbackQueryHandler(on_ban_button, pattern="^ban:"))
+
+    app.add_handler(MessageHandler(filters.COMMAND, on_qrand_spam))
+    app.add_handler(MessageHandler(filters.TEXT, on_qrand_spam))
+
+    app.add_handler(CallbackQueryHandler(on_ban_button, pattern=r"^ban:"))
 
     if RSS_URL and CHANNEL_ID:
         app.job_queue.run_repeating(rss_tick, interval=RSS_POLL_SECONDS, first=10)
 
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
