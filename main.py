@@ -68,14 +68,20 @@ async def is_admin(chat_id, user_id, context):
 
 def load_state():
     if os.path.exists(RSS_STATE_FILE):
-        with open(RSS_STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(RSS_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
 
 def save_state(state):
-    with open(RSS_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
+    try:
+        with open(RSS_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
 
 # =======================
@@ -83,7 +89,7 @@ def save_state(state):
 # =======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает 😎")
+    await update.message.reply_text("Бот работает 😎\nКоманды: /rules /nick /rssstatus")
 
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -91,28 +97,43 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("❌ Только в группе.")
+    """
+    /nick <до 16 символов> — ставит custom admin title.
+    Работает только в supergroup.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not chat or chat.type != "supergroup":
+        await msg.reply_text("❌ /nick работает только в супергруппе.")
         return
 
     if not context.args:
-        await update.message.reply_text("Использование: /nick ТвойНик")
+        await msg.reply_text("Использование: /nick ТвойНик (до 16 символов)")
         return
 
-    new_nick = " ".join(context.args).strip()
-
-    if len(new_nick) > 16:
-        await update.message.reply_text("❌ Максимум 16 символов.")
+    title = " ".join(context.args).strip()
+    if len(title) > 16:
+        await msg.reply_text("❌ Ник слишком длинный. Максимум 16 символов.")
         return
 
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    # Проверим, что бот админ и может назначать админов
+    me = await context.bot.get_me()
+    try:
+        my_member = await context.bot.get_chat_member(chat.id, me.id)
+        if my_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            await msg.reply_text("❌ Бот не админ. Дай ему админку в чате.")
+            return
+    except:
+        pass
 
     try:
+        # Делаем юзера админом с МИНИМАЛЬНЫМ правом (иначе title не поставить)
         await context.bot.promote_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            can_manage_chat=False,
+            chat_id=chat.id,
+            user_id=user.id,
+            can_manage_chat=True,      # 👈 минимально, чтобы считался админом
             can_delete_messages=False,
             can_manage_video_chats=False,
             can_restrict_members=False,
@@ -120,29 +141,39 @@ async def nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             can_change_info=False,
             can_invite_users=False,
             can_pin_messages=False,
-            can_post_stories=False,
-            can_edit_stories=False,
-            can_delete_stories=False,
+            can_manage_topics=False,
         )
 
+        # Ставим титул
         await context.bot.set_chat_administrator_custom_title(
-            chat_id=chat_id,
-            user_id=user_id,
-            custom_title=new_nick
+            chat_id=chat.id,
+            user_id=user.id,
+            custom_title=title
         )
 
-        await update.message.reply_text(f"✅ Ник установлен: {new_nick}")
+        await msg.reply_text(f"✅ Ник установлен: {title}")
 
-    except BadRequest:
-        await update.message.reply_text("❌ Бот должен быть админом с правом назначать администраторов.")
+    except BadRequest as e:
+        # Самые частые причины:
+        # - бот не имеет права "Добавлять администраторов"
+        # - пользователя нельзя редактировать (owner/админ не от бота)
+        await msg.reply_text(
+            "❌ Не получилось поставить ник.\n"
+            "Проверь:\n"
+            "1) бот админ и включено право «Добавлять администраторов»\n"
+            "2) ты не владелец чата\n"
+            "3) если ты уже админ, то бот должен иметь право тебя редактировать\n"
+            f"\nОшибка: {e.message if hasattr(e,'message') else str(e)}"
+        )
 
 
 async def rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state = context.application.bot_data.get("rss_state", load_state())
+    state = context.application.bot_data.get("rss_state") or load_state()
     await update.message.reply_text(
-        f"RSS: {'✅' if RSS_URL else '❌'}\n"
-        f"CHANNEL: {CHANNEL_ID}\n"
-        f"Last ID: {state.get('last_id', '(пусто)')}"
+        f"RSS_URL: {'✅' if RSS_URL else '❌'}\n"
+        f"CHANNEL_ID: {CHANNEL_ID or '❌'}\n"
+        f"poll: {RSS_POLL_SECONDS}s\n"
+        f"last_id: {state.get('last_id', '') or '(пусто)'}"
     )
 
 
@@ -151,10 +182,11 @@ async def rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =======================
 
 async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for user in update.message.new_chat_members:
-        sent = await update.message.reply_text(
-            WELCOME_TEXT.format(mention=mention_html(user)),
-            parse_mode="HTML"
+    for u in update.effective_message.new_chat_members:
+        sent = await update.effective_message.reply_text(
+            WELCOME_TEXT.format(mention=mention_html(u)),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
         context.application.create_task(
             delete_later(context, sent.chat_id, sent.message_id, DELETE_WELCOME_AFTER_SECONDS)
@@ -162,39 +194,42 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.left_chat_member
+    left = update.effective_message.left_chat_member
 
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton(
-            f"🚫 Забанить {user.full_name}",
-            callback_data=f"ban:{user.id}"
+            f"🚫 Забанить {left.full_name}",
+            callback_data=f"ban:{left.id}"
         )
     ]])
 
-    await update.message.reply_text(
-        f"{user.full_name} вышел из чата.",
+    await update.effective_message.reply_text(
+        f"{left.full_name} вышел из чата.",
         reply_markup=kb
     )
 
 
 async def on_ban_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    if not await is_admin(query.message.chat_id, query.from_user.id, context):
-        await query.answer("Только админ.", show_alert=True)
+    if not await is_admin(q.message.chat_id, q.from_user.id, context):
+        await q.answer("Только админ.", show_alert=True)
         return
 
-    user_id = int(query.data.split(":")[1])
-    await context.bot.ban_chat_member(query.message.chat_id, user_id)
-    await query.message.edit_text("✅ Забанен.")
+    user_id = int(q.data.split(":")[1])
+    try:
+        await context.bot.ban_chat_member(q.message.chat_id, user_id)
+        await q.message.edit_text("✅ Забанен.")
+    except Exception as e:
+        await q.message.edit_text(f"❌ Не смог забанить: {type(e).__name__}")
 
 
 async def on_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-    if text.startswith("/qrand"):
+    txt = (update.effective_message.text or "").strip()
+    if txt.startswith("/qrand") or txt.startswith("/qrand@"):
         context.application.create_task(
-            delete_later(context, update.message.chat_id, update.message.message_id, DELETE_QRAND_AFTER_SECONDS)
+            delete_later(context, update.effective_message.chat_id, update.effective_message.message_id, DELETE_QRAND_AFTER_SECONDS)
         )
 
 
@@ -207,24 +242,27 @@ async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
         return
 
     state = context.application.bot_data.setdefault("rss_state", load_state())
-    last_id = state.get("last_id")
+    last_id = state.get("last_id", "")
 
     feed = feedparser.parse(RSS_URL)
-    entries = feed.entries
-
+    entries = getattr(feed, "entries", []) or []
     if not entries:
         return
 
-    # первый запуск — просто запоминаем последний
+    # первый запуск — запоминаем самый свежий, не спамим старым
     if not last_id:
-        state["last_id"] = entries[0].get("id") or entries[0].get("link")
-        save_state(state)
+        newest = entries[0].get("id") or entries[0].get("link")
+        if newest:
+            state["last_id"] = newest
+            save_state(state)
         return
 
     new_posts = []
     for entry in entries:
-        entry_id = entry.get("id") or entry.get("link")
-        if entry_id == last_id:
+        eid = entry.get("id") or entry.get("link")
+        if not eid:
+            continue
+        if eid == last_id:
             break
         new_posts.append(entry)
 
@@ -234,12 +272,14 @@ async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
     new_posts.reverse()
 
     for entry in new_posts:
-        entry_id = entry.get("id") or entry.get("link")
-        caption = (entry.get("title", "") + "\n\n" + entry.get("link", "")).strip()
+        eid = entry.get("id") or entry.get("link")
+        caption = (entry.get("title") or entry.get("summary") or "").strip()
+        link = (entry.get("link") or "").strip()
+        text = (caption + "\n\n" + link).strip()
 
         try:
-            await context.bot.send_message(CHANNEL_ID, caption)
-            state["last_id"] = entry_id
+            await context.bot.send_message(CHANNEL_ID, text[:4096] if text else link)
+            state["last_id"] = eid
             save_state(state)
         except:
             pass
@@ -250,6 +290,9 @@ async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
 # =======================
 
 def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан.")
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -259,13 +302,16 @@ def main():
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
-    app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, on_qrand))
-    app.add_handler(CallbackQueryHandler(on_ban_button, pattern="^ban:"))
+
+    app.add_handler(MessageHandler(filters.COMMAND, on_qrand))
+    app.add_handler(MessageHandler(filters.TEXT, on_qrand))
+
+    app.add_handler(CallbackQueryHandler(on_ban_button, pattern=r"^ban:"))
 
     if RSS_URL and CHANNEL_ID:
         app.job_queue.run_repeating(rss_tick, interval=RSS_POLL_SECONDS, first=10)
 
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
