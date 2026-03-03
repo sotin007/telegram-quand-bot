@@ -137,6 +137,7 @@ def ytdlp_options_for(url: str, outtmpl: str) -> dict:
     }
 def extract_urls(text: str):
     ...
+    
     async def resolve_final_url(url: str) -> str:
     try:
         async with httpx.AsyncClient(
@@ -148,6 +149,7 @@ def extract_urls(text: str):
             return str(r.url)
     except Exception:
         return url
+        
 async def download_media_from_url(url: str) -> Tuple[List[Path], Optional[str]]:
     """
     Возвращает (files, error_text). Если error_text != None — не удалось.
