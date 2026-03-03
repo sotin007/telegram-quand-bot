@@ -428,16 +428,16 @@ def run_ytdlp_download(url: str) -> Tuple[List[Path], Optional[str]]:
     outtpl = str(tmp / "%(title).80s_%(id)s.%(ext)s")
 
     cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "--no-warnings",
-        "--restrict-filenames",
-        "-f",
-        "best[ext=mp4]/best",   # no merging
-        "-o",
-        outtpl,
-        url,
-    ]
+    "yt-dlp",
+    "--no-playlist",
+    "--no-warnings",
+    "--restrict-filenames",
+    "--user-agent", "Mozilla/5.0",
+    "--add-header", "Accept-Language:en-US,en;q=0.9",
+    "-f", "best",
+    "-o", outtpl,
+    url,
+]
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
