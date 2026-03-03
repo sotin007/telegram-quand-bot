@@ -1,15 +1,15 @@
 import os
+import re
 import json
 import asyncio
-import feedparser
-from typing import List
+import tempfile
+from pathlib import Path
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-)
+import feedparser
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -21,14 +21,26 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest
 
+# =======================
+# ENV
+# =======================
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-# ===== ССЫЛКИ ДЛЯ КНОПОК В ПОСТАХ =====
+RSS_URL = os.environ.get("RSS_URL", "").strip()
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
+RSS_POLL_SECONDS = int(os.environ.get("RSS_POLL_SECONDS", "120"))
+RSS_STATE_FILE = "rss_state.json"
+
+# =======================
+# LINKS (кнопки)
+# =======================
 INSTAGRAM_URL = "https://www.instagram.com/yomabar.lt?igsh=NmZxMzBnNWFjaHQy"
 FACEBOOK_URL = "https://www.facebook.com/share/1P3dFJ5f5Y/?mibextid=wwXIfr"
 WEBSITE_URL = "https://www.yomahayoma.show/?fbclid=IwVERFWAQSeMZleHRuA2FlbQIxMABzcnRjBmFwcF9pZAo2NjI4NTY4Mzc5AAEesge47GAJQ72RstwAGARsRXJktokh_iExhSv_5IPnccBzVBz8tW9oLkKuFtY_aem_0ZLfyoSFOW9iUSYpi0ElTQ"
 
-# ===== НАСТРОЙКИ ЧАТА =====
+# =======================
+# CHAT SETTINGS
+# =======================
 RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
     "🤩🥺Наши правила:🥺🤩\n"
@@ -40,15 +52,23 @@ WELCOME_TEXT = "👋 {mention}\n\n" + RULES_TEXT
 DELETE_WELCOME_AFTER_SECONDS = 30
 DELETE_QRAND_AFTER_SECONDS = 5
 
-# ===== RSS -> КАНАЛ =====
-RSS_URL = os.environ.get("RSS_URL", "").strip()
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
-RSS_POLL_SECONDS = int(os.environ.get("RSS_POLL_SECONDS", "120"))
-RSS_STATE_FILE = "rss_state.json"
+# Если хочешь удалять сообщение со ссылкой после успешной отправки видео:
+# 0 = не удалять, например поставь 30 чтобы удалял через 30 сек
+DELETE_VIDEO_LINK_AFTER_SECONDS = 0
 
+# Ограничение, чтобы не пытаться слать гигантские видео
+MAX_VIDEO_MB = 50
+MAX_VIDEO_BYTES = MAX_VIDEO_MB * 1024 * 1024
 
 # =======================
-# УТИЛИТЫ
+# REGEX: ловим ссылки
+# =======================
+URL_RE = re.compile(r"(https?://[^\s]+)", re.IGNORECASE)
+IG_RE = re.compile(r"(https?://(?:www\.)?instagram\.com/[^\s]+)", re.IGNORECASE)
+TT_RE = re.compile(r"(https?://(?:www\.)?(?:vm\.)?tiktok\.com/[^\s]+|https?://(?:www\.)?tiktok\.com/[^\s]+)", re.IGNORECASE)
+
+# =======================
+# UTILS
 # =======================
 def mention_html(user) -> str:
     name = (user.full_name or "пользователь").replace("<", "").replace(">", "")
@@ -101,7 +121,7 @@ def entry_caption(e) -> str:
     return (e.get("title") or e.get("summary") or "").strip()
 
 
-def entry_images(e) -> List[str]:
+def entry_images(e):
     urls = []
 
     for m in (e.get("media_content") or []):
@@ -119,13 +139,11 @@ def entry_images(e) -> List[str]:
         if u:
             urls.append(u)
 
-    out = []
-    seen = set()
+    out, seen = [], set()
     for u in urls:
         if u and u not in seen:
             seen.add(u)
             out.append(u)
-
     return out[:10]
 
 
@@ -138,10 +156,14 @@ def social_buttons() -> InlineKeyboardMarkup:
 
 
 # =======================
-# КОМАНДЫ
+# COMMANDS
 # =======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает 😎\nКоманды: /rules /nick /rssstatus")
+    await update.message.reply_text(
+        "Бот работает 😎\nКоманды: /rules /nick /rssstatus\n"
+        "Авто: удаляет /qrand, приветствует новых, бан-кнопка после выхода, RSS->канал,\n"
+        "и пробует превращать ссылки Instagram/TikTok в видео."
+    )
 
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,11 +189,10 @@ async def nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # минимально делаем админом (иначе титул не поставить)
         await context.bot.promote_chat_member(
             chat_id=chat.id,
             user_id=user.id,
-            can_manage_chat=True,
+            can_manage_chat=True,  # минимально, чтобы можно было ставить title
             can_delete_messages=False,
             can_manage_video_chats=False,
             can_restrict_members=False,
@@ -181,15 +202,12 @@ async def nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             can_pin_messages=False,
             can_manage_topics=False,
         )
-
         await context.bot.set_chat_administrator_custom_title(
             chat_id=chat.id,
             user_id=user.id,
             custom_title=title
         )
-
         await msg.reply_text(f"✅ Ник установлен: {title}")
-
     except BadRequest as e:
         await msg.reply_text(
             "❌ Не получилось поставить ник.\n"
@@ -211,7 +229,7 @@ async def rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =======================
-# СОБЫТИЯ ЧАТА
+# CHAT EVENTS
 # =======================
 async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -270,7 +288,140 @@ async def on_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =======================
-# RSS (без дублей) + КНОПКИ
+# VIDEO DOWNLOADER (IG + TikTok)
+# =======================
+def pick_first_supported_url(text: str) -> str | None:
+    if not text:
+        return None
+    # сначала IG / TikTok, чтобы не хватать любую ссылку
+    m = IG_RE.search(text)
+    if m:
+        return m.group(1)
+    m = TT_RE.search(text)
+    if m:
+        return m.group(1)
+    return None
+
+
+def ytdlp_download(url: str, out_dir: str) -> tuple[str | None, str | None]:
+    """
+    Returns: (filepath, error_reason)
+    """
+    outtmpl = str(Path(out_dir) / "%(title).80s.%(ext)s")
+
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 2,
+        "socket_timeout": 15,
+        "format": "best[ext=mp4]/best",
+        # немного повышает шанс на IG
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
+        },
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                return None, "Не смог получить данные по ссылке."
+
+            # бывает, что возвращается playlist, но мы запретили - на всякий
+            if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
+                info = info["entries"][0]
+
+            filename = ydl.prepare_filename(info)
+            if filename and os.path.exists(filename):
+                return filename, None
+
+            # иногда ext меняется после постобработки — найдём любой файл в папке
+            files = sorted(Path(out_dir).glob("*"))
+            if files:
+                return str(files[0]), None
+
+            return None, "Файл не появился после скачивания."
+    except DownloadError as e:
+        msg = str(e)
+        # делаем сообщение чуть короче
+        if "This video is private" in msg or "private" in msg.lower():
+            return None, "Видео приватное/закрыто (нужен доступ)."
+        if "Login" in msg or "cookies" in msg.lower() or "sign in" in msg.lower():
+            return None, "Требуется вход/куки (Instagram не даёт скачать без доступа)."
+        if "403" in msg:
+            return None, "Доступ запрещён (403). Instagram мог заблокировать скачивание."
+        return None, f"Ошибка скачивания: {msg[:200]}"
+    except Exception as e:
+        return None, f"Ошибка: {type(e).__name__}: {str(e)[:200]}"
+
+
+async def on_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+
+    # не реагируем на канал/служебные
+    if not msg or not chat:
+        return
+
+    text = msg.text or msg.caption or ""
+    url = pick_first_supported_url(text)
+    if not url:
+        return
+
+    # чтобы не спамить: если это команда /qrand - уже обработали, а тут просто выйдем
+    if (msg.text or "").strip().startswith("/qrand"):
+        return
+
+    status = await msg.reply_text("⏳ Пытаюсь скачать видео…")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath, reason = await asyncio.to_thread(ytdlp_download, url, tmpdir)
+
+        if not filepath:
+            await status.edit_text(f"❌ Не смог скачать.\nПричина: {reason}\n\nСсылка: {url}")
+            return
+
+        try:
+            size = os.path.getsize(filepath)
+            if size > MAX_VIDEO_BYTES:
+                await status.edit_text(
+                    f"❌ Видео слишком большое ({size/1024/1024:.1f} MB).\n"
+                    f"Лимит {MAX_VIDEO_MB} MB.\n"
+                    f"Ссылка: {url}"
+                )
+                return
+
+            await context.bot.send_video(
+                chat_id=chat.id,
+                video=open(filepath, "rb"),
+                caption="✅ Видео (авто)\n" + url,
+                supports_streaming=True,
+            )
+
+            await status.delete()
+
+            if DELETE_VIDEO_LINK_AFTER_SECONDS and DELETE_VIDEO_LINK_AFTER_SECONDS > 0:
+                context.application.create_task(
+                    delete_later(context, chat.id, msg.message_id, DELETE_VIDEO_LINK_AFTER_SECONDS)
+                )
+
+        except BadRequest as e:
+            await status.edit_text(
+                "❌ Скачал, но Telegram не принял файл.\n"
+                f"Причина: {e.message if hasattr(e,'message') else str(e)}\n"
+                f"Ссылка: {url}"
+            )
+        except Exception as e:
+            await status.edit_text(
+                f"❌ Ошибка при отправке видео: {type(e).__name__}\n"
+                f"Ссылка: {url}"
+            )
+
+
+# =======================
+# RSS (без дублей) + кнопки
 # =======================
 async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
     if not RSS_URL or not CHANNEL_ID:
@@ -284,7 +435,6 @@ async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
     if not entries:
         return
 
-    # первый запуск — запоминаем самый свежий, не спамим старым
     if not last_id:
         newest = entry_id(entries[0])
         if newest:
@@ -304,7 +454,7 @@ async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
     if not new_entries:
         return
 
-    new_entries.reverse()  # старые -> новые
+    new_entries.reverse()
 
     kb = social_buttons()
 
@@ -329,7 +479,6 @@ async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
                             media.append(InputMediaPhoto(media=url))
                     await context.bot.send_media_group(chat_id=CHANNEL_ID, media=media)
 
-                    # кнопки отдельно (Telegram не позволяет кнопки на media_group)
                     await context.bot.send_message(
                         chat_id=CHANNEL_ID,
                         text="🔗 Links:",
@@ -374,11 +523,14 @@ def main():
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
+    app.add_handler(CallbackQueryHandler(on_ban_button, pattern=r"^ban:"))
 
+    # удаление /qrand
     app.add_handler(MessageHandler(filters.COMMAND, on_qrand))
     app.add_handler(MessageHandler(filters.TEXT, on_qrand))
 
-    app.add_handler(CallbackQueryHandler(on_ban_button, pattern=r"^ban:"))
+    # ссылки -> видео (IG + TikTok)
+    app.add_handler(MessageHandler(filters.TEXT | filters.Caption, on_video_link))
 
     if RSS_URL and CHANNEL_ID:
         app.job_queue.run_repeating(rss_tick, interval=RSS_POLL_SECONDS, first=10)
