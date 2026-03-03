@@ -34,7 +34,7 @@ from telegram.ext import (
 )
 
 # =========================
-# ENV / НАСТРОЙКИ
+# ENV / НАСТРОЙКИ 
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
