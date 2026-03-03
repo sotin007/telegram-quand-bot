@@ -54,7 +54,7 @@ DELETE_QRAND_AFTER_SECONDS = 5
 
 # Если хочешь удалять сообщение со ссылкой после успешной отправки видео:
 # 0 = не удалять, например поставь 30 чтобы удалял через 30 сек
-DELETE_VIDEO_LINK_AFTER_SECONDS = 0
+DELETE_VIDEO_LINK_AFTER_SECONDS = 30
 
 # Ограничение, чтобы не пытаться слать гигантские видео
 MAX_VIDEO_MB = 50
