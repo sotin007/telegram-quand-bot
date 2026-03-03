@@ -2,25 +2,27 @@ import asyncio
 import json
 import os
 import re
-import tempfile
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 
 import feedparser
+from yt_dlp import YoutubeDL
+
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
 )
-from telegram.constants import ChatMemberStatus, ParseMode
+from telegram.constants import ParseMode, ChatMemberStatus
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     Application,
-    ApplicationBuilder,
     CallbackQueryHandler,
-    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -28,560 +30,442 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG (ENV + DEFAULTS)
+# ENV / CONFIG
 # =========================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-
-# RSS → channel
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # например: @yomabar
 RSS_URL = os.getenv("RSS_URL", "").strip()
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@yomabar").strip()  # можно @channel или -100...
 RSS_POLL_SECONDS = int(os.getenv("RSS_POLL_SECONDS", "120"))
 
-# Behavior
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
 
-# Links
-ENABLE_MEDIA_FETCH = os.getenv("ENABLE_MEDIA_FETCH", "1").strip() != "0"
-DELETE_VIDEO_LINK_AFTER_SECONDS = int(os.getenv("DELETE_VIDEO_LINK_AFTER_SECONDS", "0"))  # если хочешь удалять ссылки после скачивания
-
-# Footer links (в посты RSS)
 INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://www.instagram.com/yomabar.lt").strip()
-FACEBOOK_URL = os.getenv("FACEBOOK_URL", "https://www.facebook.com/share/1P3dFJ5f5Y/").strip()
+FACEBOOK_URL = os.getenv("FACEBOOK_URL", "https://www.facebook.com").strip()
 SITE_URL = os.getenv("SITE_URL", "https://www.yomahayoma.show/").strip()
 
-# Storage
-DATA_DIR = Path(os.getenv("DATA_DIR", ".")).resolve()
-STATE_FILE = DATA_DIR / "state.json"
+STATE_FILE = Path("state.json")
 
-RULES_TEXT = (
+WELCOME_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
     "🤩🥺Наши правила:🥺🤩\n"
     "😖🤬Без политики! 🤬😣\n"
     "😶‍🌫️🤯😳Не обижать друг друга!😳🤯😶‍🌫️"
 )
 
-START_TEXT = (
-    "Бот работает 😎\n"
-    "Команды: /rules /nick /rssstatus\n"
-    f"Авто: удаляет /qrand через {DELETE_QRAND_AFTER_SECONDS}с, приветствует новых, бан-кнопка после выхода, RSS->канал,\n"
-    "и пробует превращать ссылки Instagram/TikTok в видео/фото."
-)
-
-# =========================
-# STATE
-# =========================
-
-@dataclass
-class BotState:
-    rss_seen: Dict[str, float] = field(default_factory=dict)  # id/link -> timestamp
-    rss_last_posted: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "rss_seen": self.rss_seen,
-            "rss_last_posted": self.rss_last_posted,
-        }
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "BotState":
-        st = BotState()
-        st.rss_seen = d.get("rss_seen", {}) or {}
-        st.rss_last_posted = d.get("rss_last_posted")
-        return st
-
-
-STATE = BotState()
-
-
-def load_state() -> None:
-    global STATE
-    try:
-        if STATE_FILE.exists():
-            STATE = BotState.from_dict(json.loads(STATE_FILE.read_text("utf-8")))
-    except Exception:
-        # если файл битый — просто начнем заново
-        STATE = BotState()
-
-
-def save_state() -> None:
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(STATE.to_dict(), ensure_ascii=False, indent=2), "utf-8")
-    except Exception:
-        pass
-
-
 # =========================
 # HELPERS
 # =========================
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text("utf-8"))
+        except Exception:
+            return {}
+    return {}
 
-def is_supergroup(chat_type: Optional[str]) -> bool:
-    return chat_type in ("supergroup", "channel")
+def save_state(state: dict) -> None:
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
 
+def is_supergroup(update: Update) -> bool:
+    c = update.effective_chat
+    return bool(c and c.type in ("supergroup",))
 
-async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+def normalize_nick(text: str) -> str:
+    text = text.strip()
+    # ограничим до 16 символов (как ты просил)
+    if len(text) > 16:
+        text = text[:16]
+    return text
+
+async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    chat = update.effective_chat
+    if not chat:
+        return False
     try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
+        member = await context.bot.get_chat_member(chat.id, user_id)
         return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
     except Exception:
         return False
 
+def extract_links_from_text(text: str) -> List[str]:
+    # простая регулярка на ссылки
+    url_re = re.compile(r"(https?://\S+)")
+    return url_re.findall(text or "")
 
-def normalize_nick(s: str) -> str:
-    s = s.strip()
-    # Telegram custom title max 16 символов (в твоем требовании)
-    if len(s) > 16:
-        s = s[:16]
-    return s
+def is_supported_media_link(url: str) -> bool:
+    u = url.lower()
+    return (
+        "instagram.com" in u
+        or "tiktok.com" in u
+        or "vm.tiktok.com" in u
+    )
 
+def build_links_footer() -> str:
+    # в подписи к постам в канал
+    return (
+        f"\n\n"
+        f"🔗 Instagram: {INSTAGRAM_URL}\n"
+        f"🔗 Facebook: {FACEBOOK_URL}\n"
+        f"🔗 Site: {SITE_URL}"
+    )
 
-INSTAGRAM_RE = re.compile(r"(https?://\S*instagram\.com/\S+)", re.IGNORECASE)
-TIKTOK_RE = re.compile(r"(https?://\S*(tiktok\.com|vm\.tiktok\.com)/\S+)", re.IGNORECASE)
+@dataclass
+class DownloadResult:
+    ok: bool
+    files: List[Path]
+    reason: str = ""
+    tech: str = ""
 
+def ytdlp_download(url: str) -> DownloadResult:
+    """
+    Скачивает медиа без ffmpeg-склейки.
+    Возвращает список файлов (видео/картинки).
+    """
+    tmp = Path("/tmp")
+    tmp.mkdir(parents=True, exist_ok=True)
+    prefix = f"tg_{uuid.uuid4().hex}_"
+    outtmpl = str(tmp / f"{prefix}%(id)s_%(autonumber)03d.%(ext)s")
 
-def extract_first_link(text: str) -> Optional[str]:
-    if not text:
-        return None
-    m = INSTAGRAM_RE.search(text)
-    if m:
-        return m.group(1)
-    m = TIKTOK_RE.search(text)
-    if m:
-        return m.group(1)
-    return None
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        # Важно: выбираем один "best" чтобы не требовать ffmpeg merge
+        "format": "best[ext=mp4]/best",
+        "merge_output_format": None,
+        "retries": 2,
+        "socket_timeout": 20,
+    }
 
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+        # соберём все файлы по нашему prefix
+        files = sorted(tmp.glob(f"{prefix}*.*"))
+
+        # иногда yt-dlp не скачивает (например инста-пост без видео)
+        if not files:
+            # попробуем понять тип
+            # если это инста-карусель фото, yt-dlp обычно тоже скачивает, но если закрыто — будет пусто
+            return DownloadResult(False, [], "Не получилось скачать.", "Пустой результат (0 файлов). Возможно приват/защита/без медиа.")
+
+        return DownloadResult(True, files)
+    except Exception as e:
+        return DownloadResult(False, [], "Не получилось скачать. Возможно защита/блокировка или ссылка странная.", f"{type(e).__name__}: {e}")
+
+async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int) -> None:
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
 # =========================
 # COMMANDS
 # =========================
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(START_TEXT)
-
+    await update.message.reply_text(
+        "Бот работает 😎\n"
+        "Команды: /rules /nick /rssstatus\n"
+        f"Авто: удаляет /qrand через {DELETE_QRAND_AFTER_SECONDS}с, приветствует новых, бан-кнопка после выхода, RSS->канал,\n"
+        "и пытается превращать ссылки Instagram/TikTok в видео/фото.\n\n"
+        "⚠️ Если бот не реагирует на ссылки — выключи Privacy:\n"
+        "@BotFather → /setprivacy → Disable"
+    )
 
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(RULES_TEXT)
-
+    await update.message.reply_text(WELCOME_TEXT)
 
 async def cmd_rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not RSS_URL:
-        await update.effective_message.reply_text("RSS не настроен (нет RSS_URL).")
-        return
-    count = len(STATE.rss_seen)
-    last = STATE.rss_last_posted or "—"
-    await update.effective_message.reply_text(f"RSS: включен ✅\nПроверка: каждые {RSS_POLL_SECONDS}с\nВидели записей: {count}\nПоследний: {last}")
-
+    state = load_state()
+    last = state.get("rss_last_id")
+    await update.message.reply_text(
+        "RSS статус:\n"
+        f"- RSS_URL: {RSS_URL or 'не задан'}\n"
+        f"- CHANNEL_USERNAME: {CHANNEL_USERNAME or 'не задан'}\n"
+        f"- POLL: {RSS_POLL_SECONDS}s\n"
+        f"- last_id: {last}"
+    )
 
 async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.effective_message
+    if not is_supergroup(update):
+        await update.message.reply_text("❌ /nick работает только в супер-группе.")
+        return
+
+    if not update.message:
+        return
+
+    nick = normalize_nick(" ".join(context.args or []))
+    if not nick:
+        await update.message.reply_text("Используй так: /nick невеста")
+        return
+
     chat = update.effective_chat
     user = update.effective_user
-
-    if not chat or chat.type != "supergroup":
-        await msg.reply_text("❌ /nick работает только в супер-группе.")
+    if not chat or not user:
         return
 
-    if not context.args:
-        await msg.reply_text("Использование: /nick ТВОЙ_НИК (до 16 символов)")
-        return
-
-    title = normalize_nick(" ".join(context.args))
-    if not title:
-        await msg.reply_text("❌ Ник пустой.")
-        return
-
-    # Бот должен уметь повышать
-    me = await context.bot.get_chat_member(chat.id, context.bot.id)
-    if me.status != ChatMemberStatus.ADMINISTRATOR:
-        await msg.reply_text("❌ Я не админ. Дай мне админку, чтобы ставить ники.")
-        return
-    # can_promote_members не всегда отдается как bool на всех клиентах,
-    # но если Telegram запретит — поймаем ошибку.
+    # нужно чтобы бот был админом с правом назначать custom title
     try:
-        # 1) Сделать юзера админом БЕЗ прав (по максимуму выключено)
-        # Иногда Telegram не любит 100% false — тогда упадет, и мы покажем причину.
+        # В PTB: promote_chat_member поддерживает custom_title (Telegram API)
         await context.bot.promote_chat_member(
             chat_id=chat.id,
             user_id=user.id,
-            can_manage_chat=False,
-            can_delete_messages=False,
-            can_manage_video_chats=False,
-            can_restrict_members=False,
-            can_promote_members=False,
+            # не меняем реальные права, только титул
             can_change_info=False,
+            can_post_messages=False,
+            can_edit_messages=False,
+            can_delete_messages=False,
             can_invite_users=False,
+            can_restrict_members=False,
             can_pin_messages=False,
+            can_promote_members=False,
+            can_manage_video_chats=False,
+            can_manage_chat=False,
+            is_anonymous=False,
             can_manage_topics=False,
+            custom_title=nick,
         )
-
-        # 2) Поставить кастомный титул
-        await context.bot.set_chat_administrator_custom_title(chat_id=chat.id, user_id=user.id, custom_title=title)
-        await msg.reply_text(f"✅ Готово. Твой ник: **{title}**", parse_mode=ParseMode.MARKDOWN)
-
+        await update.message.reply_text(f"✅ Ник установлен: {nick}")
     except BadRequest as e:
-        await msg.reply_text(
-            "❌ Не получилось поставить ник.\n"
-            "Причина: Telegram не дал повысить/поставить титул.\n\n"
-            f"Тех.деталь: {e}"
-        )
-    except Forbidden as e:
-        await msg.reply_text(
-            "❌ Нет прав.\n"
-            "Проверь, что я админ и у меня есть право «Добавлять администраторов».\n\n"
-            f"Тех.деталь: {e}"
-        )
-
+        await update.message.reply_text(f"❌ Не смог поставить ник.\nПричина: {e}")
+    except Forbidden:
+        await update.message.reply_text("❌ У меня нет прав. Сделай меня админом в чате.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {type(e).__name__}: {e}")
 
 # =========================
-# /qrand AUTO-DELETE
+# EVENTS: JOIN / LEAVE
 # =========================
+async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    # привет + правила
+    await update.message.reply_text(WELCOME_TEXT)
 
-async def maybe_schedule_delete_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.effective_message
+async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.left_chat_member:
+        return
+
+    left = update.message.left_chat_member
     chat = update.effective_chat
-    if not msg or not chat:
-        return
-    if not msg.text:
+    if not chat:
         return
 
-    txt = msg.text.strip()
-    if not txt.lower().startswith("/qrand"):
-        return
-
-    # админов не трогаем
-    if update.effective_user and await is_user_admin(context, chat.id, update.effective_user.id):
-        return
-
-    async def do_delete(context_: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            await context_.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
-        except Exception:
-            pass
-
-    context.job_queue.run_once(lambda c: asyncio.create_task(do_delete(c)), when=DELETE_QRAND_AFTER_SECONDS)
-
-
-# =========================
-# WELCOME + LEFT + BAN BUTTON
-# =========================
-
-async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.effective_message
-    if not msg or not msg.new_chat_members:
-        return
-    # Привет + правила
-    await msg.reply_text(RULES_TEXT)
-
-
-async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.effective_message
-    chat = update.effective_chat
-    if not msg or not chat:
-        return
-
-    left = msg.left_chat_member
-    if not left:
-        return
-
-    # Кнопка “Забанить”
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🚫 Забанить", callback_data=f"ban:{left.id}")]]
+    text = f"👋 {left.full_name} вышел(ла) из чата.\nЕсли это спамер — можно забанить:"
+    kb = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton("🚫 BAN", callback_data=f"ban:{left.id}")
     )
-    name = (left.full_name or "пользователь").strip()
-    await msg.reply_text(
-        f"👋 **{name}** вышел(ла) из чата.\nАдмины, если это спамер — можно забанить кнопкой ниже.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard,
-    )
+    await update.message.reply_text(text, reply_markup=kb)
 
-
-async def on_ban_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cb_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    if not q or not q.data:
+    if not q:
         return
     await q.answer()
+
+    data = q.data or ""
+    if not data.startswith("ban:"):
+        return
+
+    try:
+        target_id = int(data.split(":", 1)[1])
+    except Exception:
+        return
+
+    # банить может только админ
+    who = q.from_user.id if q.from_user else 0
+    fake_update = Update(update.update_id, callback_query=q)
+    if not await is_user_admin(fake_update, context, who):
+        await q.edit_message_text("❌ Банить могут только админы.")
+        return
 
     chat = q.message.chat if q.message else None
     if not chat:
         return
 
-    # кто нажал — должен быть админ
-    clicker = q.from_user
-    if not clicker or not await is_user_admin(context, chat.id, clicker.id):
-        await q.edit_message_text("❌ Только админ может банить.")
-        return
-
-    parts = q.data.split(":", 1)
-    if len(parts) != 2:
-        return
-    target_id = int(parts[1])
-
     try:
         await context.bot.ban_chat_member(chat_id=chat.id, user_id=target_id)
         await q.edit_message_text("✅ Забанен.")
+    except Forbidden:
+        await q.edit_message_text("❌ У меня нет прав банить. Дай права админа.")
+    except BadRequest as e:
+        await q.edit_message_text(f"❌ Не смог забанить: {e}")
     except Exception as e:
-        await q.edit_message_text(f"❌ Не получилось забанить.\nТех.деталь: {e}")
-
+        await q.edit_message_text(f"❌ Ошибка: {type(e).__name__}: {e}")
 
 # =========================
-# RSS → CHANNEL
+# /qrand AUTO DELETE
 # =========================
+async def on_message_maybe_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    txt = update.message.text.strip()
 
-def rss_entry_id(entry: Any) -> str:
-    # стабильный ключ
-    return str(entry.get("id") or entry.get("guid") or entry.get("link") or entry.get("title") or "")
+    # /qrand или /qrand@BotName
+    if not (txt.startswith("/qrand") or txt.startswith("/qrand@")):
+        return
 
+    chat_id = update.effective_chat.id
+    msg_id = update.message.message_id
 
-def build_rss_post(entry: Any) -> str:
-    title = (entry.get("title") or "").strip()
-    link = (entry.get("link") or "").strip()
-    summary = (entry.get("summary") or "").strip()
-
-    # Чистим HTML чуть-чуть (rss.app обычно норм, но бывает мусор)
-    summary = re.sub(r"<[^>]+>", "", summary).strip()
-
-    lines = []
-    if title:
-        lines.append(f"**{title}**")
-    if summary:
-        # ограничим, чтобы не было простыни
-        lines.append(summary[:800])
-    if link:
-        lines.append(f"\n🔗 {link}")
-
-    lines.append(
-        "\n"
-        f"📸 Instagram: {INSTAGRAM_URL}\n"
-        f"📘 Facebook: {FACEBOOK_URL}\n"
-        f"🌐 Website: {SITE_URL}"
+    # запланировать удаление
+    context.job_queue.run_once(
+        lambda ctx: asyncio.create_task(safe_delete_message(ctx, chat_id, msg_id)),
+        when=DELETE_QRAND_AFTER_SECONDS,
     )
-    return "\n".join(lines)
 
+# =========================
+# LINKS -> DOWNLOAD MEDIA
+# =========================
+async def on_message_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
 
+    text_parts = []
+    if update.message.text:
+        text_parts.append(update.message.text)
+    if update.message.caption:
+        text_parts.append(update.message.caption)
+
+    text = "\n".join(text_parts)
+    urls = extract_links_from_text(text)
+    urls = [u for u in urls if is_supported_media_link(u)]
+
+    if not urls:
+        return
+
+    # чтобы не спамил на пачку одинаковых ссылок — обработаем первую
+    url = urls[0]
+
+    # маленькая реакция чтобы было видно что бот "увидел"
+    try:
+        await update.message.reply_text("⏳ Пробую скачать медиа…")
+    except Exception:
+        pass
+
+    loop = asyncio.get_running_loop()
+    res: DownloadResult = await loop.run_in_executor(None, ytdlp_download, url)
+
+    if not res.ok:
+        await update.message.reply_text(
+            f"❌ Не получилось.\n"
+            f"Причина: {res.reason}\n\n"
+            f"Тех.деталь: {res.tech}"
+        )
+        return
+
+    # отправляем как медиа-группу (до 10 элементов)
+    files = res.files[:10]
+
+    media = []
+    for p in files:
+        ext = p.suffix.lower()
+        # грубо определим картинка или видео
+        if ext in (".jpg", ".jpeg", ".png", ".webp"):
+            media.append(InputMediaPhoto(media=p.read_bytes()))
+        elif ext in (".mp4", ".mov", ".m4v", ".webm"):
+            media.append(InputMediaVideo(media=p.read_bytes()))
+        else:
+            # неизвестное — отправим документом позже
+            pass
+
+    sent_any = False
+    if media:
+        try:
+            await update.message.reply_media_group(media=media)
+            sent_any = True
+        except Exception as e:
+            # если медиа-группа не прошла — fallback на поштучно
+            await update.message.reply_text(f"⚠️ Медиа-группа не отправилась, отправляю по одному.\nТех: {type(e).__name__}: {e}")
+
+    if not sent_any:
+        # fallback: по одному файлу
+        for p in files:
+            ext = p.suffix.lower()
+            b = p.read_bytes()
+            try:
+                if ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    await update.message.reply_photo(photo=b)
+                elif ext in (".mp4", ".mov", ".m4v", ".webm"):
+                    await update.message.reply_video(video=b)
+                else:
+                    await update.message.reply_document(document=b, filename=p.name)
+            except Exception:
+                # вообще крайний случай
+                await update.message.reply_text(f"⚠️ Не смог отправить файл: {p.name}")
+
+    # чистим tmp
+    for p in res.files:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+# =========================
+# RSS -> CHANNEL
+# =========================
 async def rss_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not RSS_URL or not CHANNEL_USERNAME:
         return
+
+    state = load_state()
+    last_id = state.get("rss_last_id")
 
     feed = feedparser.parse(RSS_URL)
     if not getattr(feed, "entries", None):
         return
 
-    new_items: List[Any] = []
-    now = time.time()
-
-    for entry in feed.entries[:30]:
-        key = rss_entry_id(entry)
-        if not key:
+    # берём самые новые сверху, но постим только то, чего ещё не было
+    new_entries = []
+    for e in feed.entries[:20]:
+        eid = getattr(e, "id", None) or getattr(e, "guid", None) or getattr(e, "link", None) or getattr(e, "title", "")
+        if not eid:
             continue
-        if key in STATE.rss_seen:
-            continue
-        STATE.rss_seen[key] = now
-        new_items.append(entry)
+        if eid == last_id:
+            break
+        new_entries.append((eid, e))
 
-    # сохраняем, чтобы не сломалось при рестарте
-    save_state()
-
-    if not new_items:
+    if not new_entries:
         return
 
-    # Публикуем старые → новые (красивее)
-    new_items.reverse()
+    # постим в обратном порядке (старые -> новые)
+    new_entries.reverse()
 
-    for entry in new_items:
-        text = build_rss_post(entry)
+    for eid, e in new_entries:
+        title = getattr(e, "title", "").strip()
+        link = getattr(e, "link", "").strip()
+
+        # описание может быть грязное (html) — оставим только коротко
+        summary = getattr(e, "summary", "")
+        summary = re.sub("<.*?>", "", summary or "").strip()
+        if len(summary) > 700:
+            summary = summary[:700] + "…"
+
+        text = f"🆕 {title}\n\n{summary}\n\n{link}{build_links_footer()}".strip()
+
         try:
             await context.bot.send_message(
                 chat_id=CHANNEL_USERNAME,
                 text=text,
-                parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=False,
             )
-            STATE.rss_last_posted = entry.get("link") or entry.get("title") or "posted"
-            save_state()
-        except Exception:
-            # если канал/права/parse_mode — просто пропустим
-            pass
-
-
-# =========================
-# INSTAGRAM/TIKTOK → DOWNLOAD & SEND
-# =========================
-
-async def handle_media_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ENABLE_MEDIA_FETCH:
-        return
-
-    msg = update.effective_message
-    chat = update.effective_chat
-    if not msg or not chat:
-        return
-
-    if not msg.text:
-        return
-
-    url = extract_first_link(msg.text)
-    if not url:
-        return
-
-    # Чтобы бот не ловил свои же сообщения
-    if msg.from_user and msg.from_user.is_bot:
-        return
-
-    status_msg = await msg.reply_text("⏳ Пытаюсь скачать…")
-
-    try:
-        files, note = await download_with_ytdlp(url)
-        if not files:
-            await status_msg.edit_text(
-                "❌ Не получилось.\n"
-                "Причина: Не получилось скачать. Возможно защита/блокировка или ссылка странная."
-                + (f"\n\nТех.деталь: {note}" if note else "")
-            )
+            state["rss_last_id"] = eid
+            save_state(state)
+        except Exception as ex:
+            # если упало — не обновляем last_id, чтобы не потерять
+            print("RSS send error:", ex)
             return
-
-        # отправляем: если много — альбом, если 1 — одиночкой
-        await send_files_as_media(update, context, files)
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        # если нужно — удалить исходную ссылку через N секунд
-        if DELETE_VIDEO_LINK_AFTER_SECONDS > 0:
-            async def do_del(context_: ContextTypes.DEFAULT_TYPE) -> None:
-                try:
-                    await context_.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
-                except Exception:
-                    pass
-            context.job_queue.run_once(lambda c: asyncio.create_task(do_del(c)), when=DELETE_VIDEO_LINK_AFTER_SECONDS)
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка.\nТех.деталь: {e}")
-
-
-async def download_with_ytdlp(url: str) -> Tuple[List[Path], str]:
-    """
-    Возвращает список скачанных файлов и текстовую заметку/ошибку.
-    """
-    # yt-dlp скачивает в tempdir, мы отдадим файлы
-    try:
-        import yt_dlp
-    except Exception as e:
-        return [], f"yt-dlp не установлен: {e}"
-
-    temp_dir = Path(tempfile.mkdtemp(prefix="media_"))
-    outtmpl = str(temp_dir / "%(title).80s_%(id)s.%(ext)s")
-
-    # Важно: без ffmpeg выбираем ОДИН формат (не merge)
-    ydl_opts = {
-        "outtmpl": outtmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": "best[ext=mp4]/best",  # одиночный файл
-        "retries": 2,
-        "fragment_retries": 2,
-        "nocheckcertificate": True,
-    }
-
-    note = ""
-    files: List[Path] = []
-
-    def _collect_downloaded_files(folder: Path) -> List[Path]:
-        all_files = []
-        for p in folder.glob("*"):
-            if p.is_file() and p.stat().st_size > 0:
-                all_files.append(p)
-        # сорт для стабильности
-        all_files.sort(key=lambda x: x.stat().st_size, reverse=True)
-        return all_files
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            # Если пост-карусель/несколько элементов — yt-dlp может вернуть entries
-            # но файлы всё равно появятся в папке.
-        files = _collect_downloaded_files(temp_dir)
-
-        # Фильтруем мусор
-        ok = []
-        for f in files:
-            ext = f.suffix.lower().lstrip(".")
-            if ext in ("mp4", "mov", "mkv", "webm", "jpg", "jpeg", "png", "gif"):
-                ok.append(f)
-        files = ok
-
-        if not files:
-            note = "Файлы не появились после скачивания."
-        return files[:10], note
-
-    except Exception as e:
-        # классическая ошибка без ffmpeg при merge — мы её уже избегаем, но оставим подсказку
-        note = str(e)
-        return [], note
-
-
-async def send_files_as_media(update: Update, context: ContextTypes.DEFAULT_TYPE, files: List[Path]) -> None:
-    msg = update.effective_message
-    if not msg:
-        return
-
-    # Разделим по типам (если смешано — пошлём по одному)
-    videos = [p for p in files if p.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm")]
-    images = [p for p in files if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".gif")]
-
-    # Если только 1 файл
-    if len(files) == 1:
-        p = files[0]
-        await send_single_file(msg, p)
-        return
-
-    # Если много картинок — кинем пачкой (по одной, чтобы без лишних заморочек)
-    # (альбом можно, но на мобиле часто “ломается” от разных форматов/размеров)
-    for p in (videos + images):
-        await send_single_file(msg, p)
-
-
-async def send_single_file(reply_to_message, path: Path) -> None:
-    try:
-        ext = path.suffix.lower()
-        with path.open("rb") as f:
-            if ext in (".jpg", ".jpeg", ".png", ".gif"):
-                await reply_to_message.reply_photo(photo=f)
-            else:
-                await reply_to_message.reply_video(video=f)
-    except BadRequest as e:
-        # если Telegram не принял как видео/фото — отправим как документ
-        try:
-            with path.open("rb") as f2:
-                await reply_to_message.reply_document(document=f2, caption=f"Файл (как документ). Причина: {e}")
-        except Exception:
-            await reply_to_message.reply_text(f"❌ Не смог отправить файл. Тех.деталь: {e}")
-    except Exception as e:
-        await reply_to_message.reply_text(f"❌ Не смог отправить файл. Тех.деталь: {e}")
-
 
 # =========================
 # MAIN
 # =========================
-
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # чтобы ошибки не “молчали”
-    try:
-        print("ERROR:", context.error)
-    except Exception:
-        pass
-
-
 def build_app() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is empty")
 
-    load_state()
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     # commands
     app.add_handler(CommandHandler("start", cmd_start))
@@ -589,20 +473,17 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("rssstatus", cmd_rssstatus))
     app.add_handler(CommandHandler("nick", cmd_nick))
 
-    # qrand auto-delete
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), maybe_schedule_delete_qrand))
+    # join/leave
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
+    app.add_handler(CallbackQueryHandler(cb_ban))
 
-    # welcome/left
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
-    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
-    app.add_handler(CallbackQueryHandler(on_ban_button, pattern=r"^ban:\d+$"))
+    # qrand delete
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message_maybe_qrand))
+    app.add_handler(MessageHandler(filters.COMMAND, on_message_maybe_qrand))  # если /qrand как команда
 
-    # instagram/tiktok links
-    # ловим любые тексты где есть instagram/tiktok/vm.tiktok
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(instagram\.com/|tiktok\.com/|vm\.tiktok\.com/)"), handle_media_links))
-
-    # errors
-    app.add_error_handler(on_error)
+    # links downloader (ВАЖНО: только если bot видит обычные сообщения — выключи privacy!)
+    app.add_handler(MessageHandler(filters.TEXT | filters.Caption(), on_message_links))
 
     # RSS job
     if RSS_URL and CHANNEL_USERNAME:
@@ -610,14 +491,13 @@ def build_app() -> Application:
 
     return app
 
-
 def main() -> None:
     app = build_app()
-
-    # ВАЖНО: Conflict бывает, если где-то еще запущен polling.
-    # drop_pending_updates=True — чтобы после рестартов не “догонял” старые апдейты
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
+    try:
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        print("FATAL:", e)
+        raise
 
 if __name__ == "__main__":
     main()
