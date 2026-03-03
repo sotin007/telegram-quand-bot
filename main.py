@@ -136,6 +136,7 @@ def ytdlp_options_for(url: str, outtmpl: str) -> dict:
         "restrictfilenames": False,
     }
 def extract_urls(text: str):
+    ...
     async def resolve_final_url(url: str) -> str:
     try:
         async with httpx.AsyncClient(
