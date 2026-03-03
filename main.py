@@ -432,9 +432,9 @@ def run_ytdlp_download(url: str) -> Tuple[List[Path], Optional[str]]:
     "--no-playlist",
     "--no-warnings",
     "--restrict-filenames",
-    "--user-agent", "Mozilla/5.0",
+    "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "--add-header", "Referer:https://www.instagram.com/",
     "--add-header", "Accept-Language:en-US,en;q=0.9",
-    "-f", "best",
     "-o", outtpl,
     url,
 ]
