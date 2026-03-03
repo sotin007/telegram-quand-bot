@@ -390,6 +390,7 @@ async def on_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (msg.text or msg.caption or "").strip()
     if not text:
         return
+
     # не реагируем на команды
     if msg.text and msg.text.startswith("/"):
         return
@@ -398,39 +399,49 @@ async def on_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not urls:
         return
 
-    # берём первую подходящую
     target = None
     for u in urls:
         if INSTAGRAM_RE.search(u) or TIKTOK_RE.search(u):
             target = u
             break
+
     if not target:
         return
 
+    # =========================
+    # 🚫 ЕСЛИ ЭТО ФОТО — НЕ КАЧАЕМ
+    # =========================
+    if "instagram.com/p/" in target.lower():
+        await msg.reply_text(
+            "Сори брат да? Я ещё не умею качать фотки, "
+            "давай как то без меня, всё пока 👋"
+        )
+        return
+
+    if "tiktok.com" in target.lower() and "/photo/" in target.lower():
+        await msg.reply_text(
+            "Сори брат да? Я ещё не умею качать фотки, "
+            "давай как то без меня, всё пока 👋"
+        )
+        return
+
+    # =========================
+    # 🎬 ИНАЧЕ ПЫТАЕМСЯ КАЧАТЬ (reel / видео)
+    # =========================
     status = await msg.reply_text("⏳ Пытаюсь скачать...")
 
-    files: List[Path] = []
+    files = []
     try:
-        # просто красивое действие
-        try:
-            await context.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.UPLOAD_VIDEO)
-        except TelegramError:
-            pass
-
         files, err = await download_media_from_url(target)
+
         if err:
             await status.edit_text(
-                "❌ Не получилось.\n"
-                "Причина: Не получилось скачать. Возможно защита/блокировка или ссылка странная.\n\n"
+                "❌ Не получилось скачать видео.\n\n"
                 f"Тех.деталь: {err}"
             )
             return
 
-        try:
-            await status.delete()
-        except TelegramError:
-            pass
-
+        await status.delete()
         await send_downloaded_media(update, context, files)
 
     finally:
