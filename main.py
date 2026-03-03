@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import html
 import json
 import os
@@ -134,7 +135,18 @@ def ytdlp_options_for(url: str, outtmpl: str) -> dict:
         "overwrites": True,
         "restrictfilenames": False,
     }
-
+def extract_urls(text: str):
+    async def resolve_final_url(url: str) -> str:
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=10.0,
+            headers={"User-Agent": "Mozilla/5.0"}
+        ) as client:
+            r = await client.get(url)
+            return str(r.url)
+    except Exception:
+        return url
 async def download_media_from_url(url: str) -> Tuple[List[Path], Optional[str]]:
     """
     Возвращает (files, error_text). Если error_text != None — не удалось.
