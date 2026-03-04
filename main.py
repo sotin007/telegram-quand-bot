@@ -139,7 +139,7 @@ def extract_urls(text: str):
     ...
     
     async def resolve_final_url(url: str) -> str:
-    try:
+    try:   
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=10.0,
