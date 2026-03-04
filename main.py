@@ -136,13 +136,15 @@ def ytdlp_options_for(url: str, outtmpl: str) -> dict:
         "restrictfilenames": False,
     }
 def extract_urls(text: str):
-    
-    async def resolve_final_url(url: str) -> str:
-    try:   
+    import re
+    return re.findall(r"https?://\S+", text or "")
+
+async def resolve_final_url(url: str) -> str:
+    try:
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=10.0,
-            headers={"User-Agent": "Mozilla/5.0"}
+            headers={"User-Agent": "Mozilla/5.0"},
         ) as client:
             r = await client.get(url)
             return str(r.url)
