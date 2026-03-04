@@ -139,6 +139,7 @@ def extract_urls(text: str):
     import re
     return re.findall(r"https?://\S+", text or "")
 
+
 async def resolve_final_url(url: str) -> str:
     try:
         async with httpx.AsyncClient(
