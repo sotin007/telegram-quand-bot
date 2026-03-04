@@ -376,21 +376,36 @@ async def on_message_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await msg.reply_text("⏳ Пытаюсь скачать...")
 
     file_path, err = await download_media_from_url(final_url)
-    if err:
-        # 2) Instagram пост /p/ иногда фото/карусель => yt-dlp пишет "There is no video in this post"
-        if is_instagram and ("There is no video in this post" in err or "no video" in err.lower()):
-            await msg.reply_text(PHOTO_SORRY_TEXT)
-            return
+   if err:
 
-        # 3) TikTok photo может быть не распознан по короткой ссылке — ловим по тексту ошибки
-        if is_tiktok and ("Unsupported URL" in err and "tiktok.com" in err and "/photo/" in err):
-            await msg.reply_text(PHOTO_SORRY_TEXT)
-            return
-
+    # Instagram ограниченный контент
+    if "inappropriate" in err.lower() or "unavailable for certain audiences" in err.lower():
         await msg.reply_text(
-            "❌ Не получилось.\n"
-            "Причина: Не получилось скачать. Возможно защита/блокировка или ссылка странная.\n\n"
-            f"Тех.деталь: {err}"
+            "❌ Не получилось скачать.\n\n"
+            "Чаще всего если пост:\n"
+            "🔞 18+ / sensitive content\n"
+            "🔒 только для залогиненных\n"
+            "🚫 ограничен по региону\n"
+            "👤 аккаунт private\n"
+            "⚠️ Instagram пометил как sensitive"
+        )
+        return
+
+    # Instagram фото
+    if is_instagram and ("no video" in err.lower()):
+        await msg.reply_text(PHOTO_SORRY_TEXT)
+        return
+
+    # TikTok фото
+    if is_tiktok and ("unsupported url" in err.lower()):
+        await msg.reply_text(PHOTO_SORRY_TEXT)
+        return
+
+    await msg.reply_text(
+        "❌ Не получилось скачать видео.\n\n"
+        f"Тех.деталь: {err}"
+    )
+    return
         )
         return
 
