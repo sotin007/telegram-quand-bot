@@ -136,7 +136,7 @@ def ytdlp_options_for(url: str, outtmpl: str) -> dict:
         "restrictfilenames": False,
     }
 def extract_urls(text: str):
-        import re
+    import re
     return re.findall(r"https?://\S+", text or "")
 
 
