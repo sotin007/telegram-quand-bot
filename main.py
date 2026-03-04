@@ -50,7 +50,7 @@ RULES_TEXT = os.getenv(
     "🦉🤯 Не обижать друг друга!🤯🦉"
 ).strip()
 
-DELETE_GRAND_AFTER_SECONDS = int(os.getenv("DELETE_GRAND_AFTER_SECONDS", "30"))
+DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "5"))
 
 # RSS -> CHANNEL
 RSS_URL = os.getenv("RSS_URL", "").strip()
@@ -284,7 +284,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Бот работает 😎\n"
         "Команды: /rules /nick /ping\n"
-        f"Авто: удаляет /grand через {DELETE_GRAND_AFTER_SECONDS}с, RSS->канал,"
+        f"Авто: удаляет /qrand через {DELETE_QRAND_AFTER_SECONDS}с, RSS->канал,"
         " и пробует превращать ссылки Instagram/TikTok в видео."
     )
 
@@ -337,7 +337,7 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"✅ Ник сохранил: {nick}")
 
 # -----------------------
-# AUTO: delete /grand
+# AUTO: delete /qrand
 # -----------------------
 async def delete_message_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -348,11 +348,11 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-async def on_grand(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     context.job_queue.run_once(
         delete_message_job,
-        when=DELETE_GRAND_AFTER_SECONDS,
+        when=DELETE_QRAND_AFTER_SECONDS,
         data={"chat_id": msg.chat_id, "message_id": msg.message_id},
         name=f"del_{msg.chat_id}_{msg.message_id}"
     )
@@ -520,8 +520,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("ping", cmd_ping))
     app.add_handler(CommandHandler("nick", cmd_nick))
 
-    # auto delete /grand
-    app.add_handler(MessageHandler(filters.Regex(r"^/grand\b"), on_grand))
+    # auto delete /qrand
+    app.add_handler(MessageHandler(filters.Regex(r"^/qrand\b"), on_qrand))
 
     # links
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
