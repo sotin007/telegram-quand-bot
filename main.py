@@ -7,6 +7,7 @@ import re
 import sqlite3
 import tempfile
 import time
+import html as pyhtml
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -20,11 +21,10 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.constants import ChatType
-from telegram.error import TelegramError, BadRequest, Forbidden
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
+    Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -54,13 +54,12 @@ RULES_TEXT = os.getenv(
     "😶‍🌫️🤯😳Не обижать друг друга!😳🤯😶‍🌫️"
 ).strip()
 
-# /qrand delete timer
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
 
 # RSS -> CHANNEL
 RSS_URL = os.getenv("RSS_URL", "").strip()
-RSS_POLL_SECONDS = int(os.getenv("RSS_POLL_SECONDS", "180"))  # 3 минуты по умолчанию
-RSS_CHANNEL_ID = os.getenv("RSS_CHANNEL_ID", "").strip()      # например: -100123...
+RSS_POLL_SECONDS = int(os.getenv("RSS_POLL_SECONDS", "180"))
+RSS_CHANNEL_ID = os.getenv("RSS_CHANNEL_ID", "").strip()  # numeric, e.g. -100...
 
 # Buttons under RSS post
 BTN_INSTAGRAM = os.getenv("BTN_INSTAGRAM", "https://www.instagram.com/yomabar.lt").strip()
@@ -68,6 +67,12 @@ BTN_FACEBOOK = os.getenv("BTN_FACEBOOK", "https://www.facebook.com/share/1P3dFJ5
 BTN_SITE = os.getenv("BTN_SITE", "https://www.yomahayoma.show/").strip()
 
 PHOTO_SORRY_TEXT = "Сори брат да? Я ещё не умею качать фотки, давай как то без меня, всё пока 👋"
+
+# Mini-AI settings
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@").lower()
+AI_EVERY_MESSAGES = int(os.getenv("AI_EVERY_MESSAGES", "10"))
+AI_COOLDOWN_SECONDS = int(os.getenv("AI_COOLDOWN_SECONDS", "30"))
+AI_TEASE_CHANCE = float(os.getenv("AI_TEASE_CHANCE", "0.35"))  # шанс подкола когда отвечает
 
 # -----------------------
 # REGEXES
@@ -193,9 +198,8 @@ def fmt_user(urow) -> str:
 # -----------------------
 # Reactions (feature 4)
 # -----------------------
-REACTION_CHANCE = 0.06     # 6%
-REACTION_COOLDOWN = 25     # сек на чат
-
+REACTION_CHANCE = 0.06
+REACTION_COOLDOWN = 25
 _chat_last_react = defaultdict(int)
 
 KEYWORD_REACTIONS = {
@@ -208,7 +212,6 @@ KEYWORD_REACTIONS = {
     "мем": ["🗿", "😂", "🔥"],
     "жесть": ["😳", "💀", "🫣"],
 }
-
 RANDOM_REACTIONS = ["😂", "🤣", "💀", "😳", "🗿", "🔥", "🫡", "🤝", "😈", "😱"]
 
 async def maybe_react(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -219,17 +222,16 @@ async def maybe_react(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text.lower().strip()
 
-    # 1) отдельный прикол: если ровно "бот"
+    # прикол: если ровно "бот"
     if text == "бот":
         await msg.reply_text("сам бот 😡")
         return
 
-    # 2) шутка про мут
+    # шутка про мут
     if "чел ты а муте" in text or "чел ты в муте" in text:
         await msg.reply_text("🔇 Человек отправлен в мут 😎")
         return
 
-    # дальше уже случайные реакции (с кулдауном)
     now = time.time()
     if now - _chat_last_react[chat.id] < REACTION_COOLDOWN:
         return
@@ -244,6 +246,89 @@ async def maybe_react(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _chat_last_react[chat.id] = now
     await msg.reply_text(random.choice(RANDOM_REACTIONS))
+
+# -----------------------
+# Mini-AI (reply every N messages + always on tag + tease)
+# -----------------------
+_chat_message_counter = defaultdict(int)
+_ai_last_reply_ts = defaultdict(int)
+
+AI_EMOJIS = ["😳", "💀", "🤣", "😂", "🗿", "🔥", "😈", "🤝", "🫡", "🥴", "🫠", "😮‍💨"]
+AI_PHRASES = [
+    "ну это база 😎",
+    "жёстко… 💀",
+    "ахах хорош 😂",
+    "я в шоке 😳",
+    "мне нравится ход мыслей 🗿",
+    "чисто по факту 🤝",
+    "ладно-ладно, понял 😅",
+    "я такое одобряю 🫡",
+    "молчу-молчу 🤐",
+    "это уже интересно 👀",
+    "вот это поворот 😈",
+    "спокойно, не кипишуем 🫠",
+]
+AI_TEASES = [
+    "{u}, ты опять начинаешь 😎",
+    "{u}, ну ты даёшь 😂",
+    "{u}, это было мощно 💀",
+    "{u}, аккуратнее, ща легендой станешь 🗿",
+    "{u}, не пали контору 🤫",
+    "{u}, давай без фанатизма 😈",
+]
+
+def bot_is_tagged(text: str) -> bool:
+    t = (text or "").lower()
+    if BOT_USERNAME and f"@{BOT_USERNAME}" in t:
+        return True
+    # слово "бот" как отдельное слово
+    if re.search(r"(?<!\w)бот(?!\w)", t):
+        return True
+    return False
+
+async def maybe_ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+
+    text = (msg.text or msg.caption or "").strip()
+    if not text:
+        return
+    if msg.text and msg.text.startswith("/"):
+        return
+
+    now = int(time.time())
+    if now - _ai_last_reply_ts[chat.id] < AI_COOLDOWN_SECONDS:
+        return
+
+    tagged = bot_is_tagged(text)
+
+    _chat_message_counter[chat.id] += 1
+    should_reply = tagged or (_chat_message_counter[chat.id] % max(1, AI_EVERY_MESSAGES) == 0)
+
+    if not should_reply:
+        return
+
+    _ai_last_reply_ts[chat.id] = now
+
+    # Иногда делаем подкол с упоминанием автора
+    tease = tagged and (random.random() < AI_TEASE_CHANCE)
+    if tease:
+        mention = user.mention_html()
+        phrase = random.choice(AI_TEASES).format(u=mention)
+        await msg.reply_text(phrase, parse_mode=ParseMode.HTML)
+        return
+
+    # обычный ответ
+    if tagged:
+        reply = random.choice(AI_PHRASES + AI_EMOJIS)
+    else:
+        # раз в N сообщений — чаще эмодзи (чтобы не флудить)
+        reply = random.choice(AI_EMOJIS + AI_EMOJIS + AI_PHRASES)
+
+    await msg.reply_text(reply)
 
 # -----------------------
 # RSS anti-duplicate
@@ -275,7 +360,6 @@ def rss_keyboard() -> InlineKeyboardMarkup:
 # URL helpers
 # -----------------------
 async def resolve_final_url(url: str) -> str:
-    """Разворачиваем короткие ссылки (vm.tiktok.com и т.п.)."""
     try:
         async with httpx.AsyncClient(
             follow_redirects=True,
@@ -327,7 +411,7 @@ def ytldp_options(outtmpl: str, url: str) -> dict:
         "retries": 2,
         "socket_timeout": 20,
         "format": fmt,
-        "merge_output_format": None,  # no ffmpeg merge
+        "merge_output_format": None,
         "postprocessors": [],
         "overwrites": True,
         "restrictfilenames": False,
@@ -359,7 +443,6 @@ async def download_media_from_url(url: str) -> Tuple[List[Path], Optional[str]]:
     files, err = await asyncio.to_thread(_blocking)
 
     if err:
-        # чистим папку при ошибке
         try:
             for p in base.rglob("*"):
                 if p.is_file():
@@ -387,7 +470,7 @@ async def cleanup_files(files: List[Path]):
         pass
 
 # -----------------------
-# COMMANDS (5,7)
+# COMMANDS
 # -----------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
@@ -417,7 +500,6 @@ async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_count = row["msg_count"] if row else 0
     media_ok = row["media_ok"] if row else 0
     media_fail = row["media_fail"] if row else 0
-
     rank = get_rank(msg_count)
 
     next_thr = None
@@ -425,11 +507,7 @@ async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if thr > msg_count:
             next_thr = thr
             break
-
-    if next_thr is None:
-        prog = "Ты уже на максимальном ранге 👑"
-    else:
-        prog = f"До следующего ранга: {next_thr - msg_count} сообщений"
+    prog = "Ты уже на максимальном ранге 👑" if next_thr is None else f"До следующего ранга: {next_thr - msg_count} сообщений"
 
     await update.effective_message.reply_text(
         f"🏆 Твой ранг: {rank}\n"
@@ -479,9 +557,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏅 Топ активных:\n{top_text}"
     )
 
-# -----------------------
-# /nick (как было, коротко)
-# -----------------------
 async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
@@ -552,7 +627,7 @@ async def on_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # -----------------------
-# Stats+Reactions counter
+# Stats counter + reactions + miniAI
 # -----------------------
 async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -561,14 +636,13 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not chat or not user:
         return
 
-    # считать сообщения
     inc_message(chat.id, user.id, user.username, user.first_name)
 
-    # реакции
     await maybe_react(update, context)
+    await maybe_ai_reply(update, context)
 
 # -----------------------
-# LINKS (IG/TT)
+# Links IG/TT
 # -----------------------
 async def on_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -590,14 +664,13 @@ async def on_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # TikTok photo
     if is_tiktok and TT_PHOTO_HINT_RE.search(final_url):
         await msg.reply_text(PHOTO_SORRY_TEXT)
-        # это НЕ ошибка скачивания видео, просто "не умеем"
         return
 
     await msg.reply_text("⏳ Пытаюсь скачать...")
 
     files, err = await download_media_from_url(final_url)
     if err:
-        # Instagram "no video" -> фото
+        # Instagram photo post
         if is_instagram and ("there is no video in this post" in err.lower() or "no video" in err.lower()):
             await msg.reply_text(PHOTO_SORRY_TEXT)
             return
@@ -607,11 +680,9 @@ async def on_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(PHOTO_SORRY_TEXT)
             return
 
-        # Friendly IG block message
         friendly = friendly_block_reason(err)
         if friendly:
             await msg.reply_text("❌ Не получилось скачать.\n\n" + friendly)
-            # считаем как fail (контент не доступен)
             inc_media_result(chat.id, user.id, ok=False)
             return
 
@@ -623,7 +694,6 @@ async def on_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         inc_media_result(chat.id, user.id, ok=False)
         return
 
-    # отправим только видео, если скачалось фото — скажем “не умею”
     try:
         fp = files[0]
         if fp.suffix.lower() in [".jpg", ".jpeg", ".png"]:
@@ -712,10 +782,10 @@ def build_app() -> Application:
     # /qrand
     app.add_handler(MessageHandler(filters.Regex(r"^/qrand\b"), on_qrand), group=5)
 
-    # Links IG/TT (выше реакции)
+    # IG/TT links (раньше, чем on_any_message, чтобы считал media_ok/fail корректно)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_links), group=10)
 
-    # Count msgs + reactions (после всего)
+    # Count msgs + reactions + miniAI (после)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_any_message), group=50)
 
     # RSS
