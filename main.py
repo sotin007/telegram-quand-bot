@@ -70,9 +70,9 @@ PHOTO_SORRY_TEXT = "Сори брат да? Я ещё не умею качать
 
 # Mini-AI settings
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@").lower()
-AI_EVERY_MESSAGES = int(os.getenv("AI_EVERY_MESSAGES", "10"))
-AI_COOLDOWN_SECONDS = int(os.getenv("AI_COOLDOWN_SECONDS", "30"))
-AI_TEASE_CHANCE = float(os.getenv("AI_TEASE_CHANCE", "0.35"))  # шанс подкола когда отвечает
+AI_EVERY_MESSAGES = int(os.getenv("AI_EVERY_MESSAGES", "1000"))
+AI_COOLDOWN_SECONDS = int(os.getenv("AI_COOLDOWN_SECONDS", "300"))
+AI_TEASE_CHANCE = float(os.getenv("AI_TEASE_CHANCE", "0.0000035"))  # шанс подкола когда отвечает
 
 # -----------------------
 # REGEXES
