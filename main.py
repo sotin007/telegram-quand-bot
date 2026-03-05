@@ -198,8 +198,8 @@ def fmt_user(urow) -> str:
 # -----------------------
 # Reactions (feature 4)
 # -----------------------
-REACTION_CHANCE = 0.06
-REACTION_COOLDOWN = 25
+REACTION_CHANCE = 30.06
+REACTION_COOLDOWN = 125
 _chat_last_react = defaultdict(int)
 
 KEYWORD_REACTIONS = {
