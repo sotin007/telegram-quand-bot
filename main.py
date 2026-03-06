@@ -279,11 +279,10 @@ AI_TEASES = [
 
 def bot_is_tagged(text: str) -> bool:
     t = (text or "").lower()
+
     if BOT_USERNAME and f"@{BOT_USERNAME}" in t:
         return True
-    # слово "бот" как отдельное слово
-    if re.search(r"(?<!\w)бот(?!\w)", t):
-        return True
+
     return False
 
 async def maybe_ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,6 +293,10 @@ async def maybe_ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = (msg.text or msg.caption or "").strip()
+    
+    if text.lower() == "бот":
+        return
+    
     if not text:
         return
     if msg.text and msg.text.startswith("/"):
