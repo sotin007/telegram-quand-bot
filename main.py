@@ -611,8 +611,8 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await msg.reply_text(f"✅ Ок, твой ник теперь: {title}")
 
-    except Exception as e:
-        await msg.reply_text(f"❌ Не получилось поставить ник.\nТех: {e}")
+        except Exception as e:
+            await msg.reply_text(f"❌ Не получилось поставить ник.\nТех: {e}")
 # -----------------------
 # /qrand delete
 # -----------------------
