@@ -578,45 +578,41 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Слишком длинно. Максимум 16 символов.")
         return
 
-    try:
-        me = await context.bot.get_chat_member(chat.id, context.bot.id)
-    if not getattr(me, "can_promote_members", False):
-        await msg.reply_text("❌ У бота нет права добавлять админов.")
-        return
+        try:
+            me = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if not getattr(me, "can_promote_members", False):
+                await msg.reply_text("❌ У бота нет права добавлять админов.")
+                return
 
-    # сначала делаем пользователя админом без прав
-    await context.bot.promote_chat_member(
-        chat_id=chat.id,
-        user_id=user.id,
-        can_manage_chat=False,
-        can_delete_messages=False,
-        can_manage_video_chats=False,
-        can_restrict_members=False,
-        can_promote_members=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-        can_post_messages=False,
-        can_edit_messages=False,
-        can_manage_topics=False,
-        is_anonymous=False,
-    )
+            await context.bot.promote_chat_member(
+                chat_id=chat.id,
+                user_id=user.id,
+                can_manage_chat=False,
+                can_delete_messages=False,
+                can_manage_video_chats=False,
+                can_restrict_members=False,
+                can_promote_members=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+                can_post_messages=False,
+                can_edit_messages=False,
+                can_manage_topics=False,
+                is_anonymous=False,
+            )
 
-    # небольшая пауза, чтобы Telegram успел обновить статус
-    await asyncio.sleep(1)
+            await asyncio.sleep(1)
 
-    # теперь ставим титул
-    await context.bot.set_chat_administrator_custom_title(
-        chat_id=chat.id,
-        user_id=user.id,
-        custom_title=title,
-    )
+            await context.bot.set_chat_administrator_custom_title(
+                chat_id=chat.id,
+                user_id=user.id,
+                custom_title=title,
+            )
 
-    await msg.reply_text(f"✅ Ок, твой ник теперь: {title}")
+            await msg.reply_text(f"✅ Ок, твой ник теперь: {title}")
 
-except Exception as e:
-    await msg.reply_text(f"❌ Не получилось поставить ник.\nТех: {e}")
-
+    except Exception as e:
+        await msg.reply_text(f"❌ Не получилось поставить ник.\nТех: {e}")
 # -----------------------
 # /qrand delete
 # -----------------------
