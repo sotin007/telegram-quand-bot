@@ -579,7 +579,7 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-    me = await context.bot.get_chat_member(chat.id, context.bot.id)
+        me = await context.bot.get_chat_member(chat.id, context.bot.id)
     if not getattr(me, "can_promote_members", False):
         await msg.reply_text("❌ У бота нет права добавлять админов.")
         return
