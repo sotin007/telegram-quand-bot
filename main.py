@@ -404,7 +404,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("ping", cmd_ping))
-    app.add_handler(CommandHandler(["nick", "ник"], cmd_nick))
+    app.add_handler(CommandHandler("nick", cmd_nick))
 
     # /qrand
     app.add_handler(MessageHandler(filters.Regex(r"^/qrand\b"), on_qrand), group=5)
