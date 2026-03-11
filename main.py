@@ -205,7 +205,7 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ У меня нет права добавлять админов.")
             return
 
-        # сначала делаем юзера админом без прав
+        # делаем пользователя админом без прав
         await context.bot.promote_chat_member(
             chat_id=chat.id,
             user_id=user.id,
@@ -223,7 +223,15 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_anonymous=False,
         )
 
-        await asyncio.sleep(1)
+        # Telegram иногда не сразу обновляет статус
+        for _ in range(5):
+            await asyncio.sleep(1)
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+                break
+        else:
+            await msg.reply_text("❌ Не удалось повысить до админа.")
+            return
 
         await context.bot.set_chat_administrator_custom_title(
             chat_id=chat.id,
@@ -235,7 +243,6 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await msg.reply_text(f"❌ Не получилось поставить ник.\nТех: {e}")
-
 # =========================
 # /qrand delete
 # =========================
