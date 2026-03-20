@@ -205,22 +205,22 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ У меня нет права добавлять админов.")
             return
 
-        await context.bot.promote_chat_member(
-            chat_id=chat.id,
-            user_id=user.id,
-            can_manage_chat=False,
-            can_delete_messages=False,
-            can_manage_video_chats=False,
-            can_restrict_members=False,
-            can_promote_members=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-            can_post_messages=False,
-            can_edit_messages=False,
-            can_manage_topics=False,
-            is_anonymous=False,
-        )
+       await context.bot.promote_chat_member(
+    chat_id=chat.id,
+    user_id=user.id,
+    can_manage_chat=True,
+    can_delete_messages=False,
+    can_manage_video_chats=False,
+    can_restrict_members=False,
+    can_promote_members=False,
+    can_change_info=False,
+    can_invite_users=False,
+    can_pin_messages=False,
+    can_post_messages=False,
+    can_edit_messages=False,
+    can_manage_topics=False,
+    is_anonymous=False,
+)
 
         for _ in range(5):
             await asyncio.sleep(1)
