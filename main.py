@@ -205,31 +205,24 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ У меня нет права добавлять админов.")
             return
 
-       await context.bot.promote_chat_member(
-    chat_id=chat.id,
-    user_id=user.id,
-    can_manage_chat=True,
-    can_delete_messages=False,
-    can_manage_video_chats=False,
-    can_restrict_members=False,
-    can_promote_members=False,
-    can_change_info=False,
-    can_invite_users=False,
-    can_pin_messages=False,
-    can_post_messages=False,
-    can_edit_messages=False,
-    can_manage_topics=False,
-    is_anonymous=False,
-)
+        await context.bot.promote_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            can_manage_chat=True,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+            can_post_messages=False,
+            can_edit_messages=False,
+            can_manage_topics=False,
+            is_anonymous=False,
+        )
 
-        for _ in range(5):
-            await asyncio.sleep(1)
-            member = await context.bot.get_chat_member(chat.id, user.id)
-            if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
-                break
-        else:
-            await msg.reply_text("❌ Не удалось повысить до админа.")
-            return
+        await asyncio.sleep(1)
 
         await context.bot.set_chat_administrator_custom_title(
             chat_id=chat.id,
