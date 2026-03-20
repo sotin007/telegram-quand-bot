@@ -205,7 +205,6 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ У меня нет права добавлять админов.")
             return
 
-        # делаем пользователя админом без прав
         await context.bot.promote_chat_member(
             chat_id=chat.id,
             user_id=user.id,
@@ -223,7 +222,6 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_anonymous=False,
         )
 
-        # Telegram иногда не сразу обновляет статус
         for _ in range(5):
             await asyncio.sleep(1)
             member = await context.bot.get_chat_member(chat.id, user.id)
