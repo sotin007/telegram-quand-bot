@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import re
@@ -7,7 +6,6 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import feedparser
 import httpx
 from yt_dlp import YoutubeDL
 
@@ -32,6 +30,7 @@ from telegram.ext import (
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
+INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "cookies.txt").strip()
 
 RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
@@ -42,15 +41,6 @@ RULES_TEXT = (
 
 PHOTO_SORRY_TEXT = "Сори брат да? Я ещё не умею качать фотки, давай как то без меня, всё пока 👋"
 BAN_PREFIX = "banleft:"
-
-# RSS / auto-posts to channel
-RSS_URL = os.getenv("RSS_URL", "").strip()
-RSS_CHANNEL_ID = os.getenv("RSS_CHANNEL_ID", "").strip()  # example: -1001234567890
-RSS_POLL_SECONDS = int(os.getenv("RSS_POLL_SECONDS", "180"))
-BTN_INSTAGRAM = os.getenv("BTN_INSTAGRAM", "").strip()
-BTN_FACEBOOK = os.getenv("BTN_FACEBOOK", "").strip()
-BTN_SITE = os.getenv("BTN_SITE", "").strip()
-RSS_STATE_FILE = os.getenv("RSS_STATE_FILE", "rss_state.json").strip()
 
 # =========================
 # LOGGING
@@ -93,7 +83,7 @@ def ytdlp_options(outtmpl: str, url: str) -> dict:
     if "tiktok.com" in url:
         fmt = "best[ext=mp4]/best"
 
-    return {
+    opts = {
         "outtmpl": outtmpl,
         "noplaylist": True,
         "quiet": True,
@@ -106,6 +96,12 @@ def ytdlp_options(outtmpl: str, url: str) -> dict:
         "overwrites": True,
         "restrictfilenames": False,
     }
+
+    # Только для Instagram подключаем cookies
+    if "instagram.com" in url and INSTAGRAM_COOKIES_FILE and Path(INSTAGRAM_COOKIES_FILE).exists():
+        opts["cookiefile"] = INSTAGRAM_COOKIES_FILE
+
+    return opts
 
 def pick_downloaded_files(folder: Path) -> List[Path]:
     files = []
@@ -165,108 +161,13 @@ async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     except Exception:
         pass
 
-def load_rss_state() -> dict:
-    try:
-        path = Path(RSS_STATE_FILE)
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {"seen": []}
-
-
-def save_rss_state(state: dict):
-    try:
-        Path(RSS_STATE_FILE).write_text(
-            json.dumps(state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
-
-
-def rss_keyboard() -> Optional[InlineKeyboardMarkup]:
-    row = []
-    if BTN_INSTAGRAM:
-        row.append(InlineKeyboardButton("Instagram", url=BTN_INSTAGRAM))
-    if BTN_FACEBOOK:
-        row.append(InlineKeyboardButton("Facebook", url=BTN_FACEBOOK))
-    if BTN_SITE:
-        row.append(InlineKeyboardButton("Site", url=BTN_SITE))
-    if not row:
-        return None
-    return InlineKeyboardMarkup([row])
-
-
-async def rss_tick(context: ContextTypes.DEFAULT_TYPE):
-    if not RSS_URL or not RSS_CHANNEL_ID:
-        return
-
-    state = load_rss_state()
-    seen = set(state.get("seen", []))
-
-    try:
-        feed = feedparser.parse(RSS_URL)
-        entries = getattr(feed, "entries", []) or []
-    except Exception as e:
-        log.warning("RSS parse failed: %s", e)
-        return
-
-    if not entries:
-        return
-
-    new_entries = []
-    for entry in entries[:30]:
-        key = (
-            (getattr(entry, "id", None) or "")
-            or (getattr(entry, "guid", None) or "")
-            or (getattr(entry, "link", None) or "")
-        ).strip()
-        if not key or key in seen:
-            continue
-        new_entries.append((key, entry))
-
-    if not new_entries:
-        return
-
-    new_entries.reverse()
-    kb = rss_keyboard()
-
-    for key, entry in new_entries:
-        title = (getattr(entry, "title", "") or "").strip()
-        link = (getattr(entry, "link", "") or "").strip()
-        summary = (getattr(entry, "summary", "") or "").strip()
-        text = title if title else "Новый пост"
-        if summary:
-            clean_summary = re.sub(r"<[^>]+>", "", summary).strip()
-            if clean_summary:
-                text += f"\n\n{clean_summary[:700]}"
-        if link:
-            text += f"\n\n{link}"
-
-        try:
-            await context.bot.send_message(
-                chat_id=int(RSS_CHANNEL_ID) if RSS_CHANNEL_ID.lstrip("-").isdigit() else RSS_CHANNEL_ID,
-                text=text,
-                reply_markup=kb,
-                disable_web_page_preview=False,
-            )
-            seen.add(key)
-        except Exception as e:
-            log.warning("RSS send failed: %s", e)
-            break
-
-    state["seen"] = list(seen)[-600:]
-    save_rss_state(state)
-
-
 # =========================
 # COMMANDS
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Бот работает 😎\n"
-        "Команды: /rules /ping /nick /rssstatus\n"
+        "Команды: /rules /ping /nick\n"
         f"/qrand удаляется через {DELETE_QRAND_AFTER_SECONDS} сек."
     )
 
@@ -277,14 +178,6 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.effective_message.reply_text(
         f"pong ✅\nchat_type={chat.type}\nchat_id={chat.id}"
-    )
-
-async def cmd_rssstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        f"RSS_URL={'✅ есть' if RSS_URL else '❌ нет'}\n"
-        f"RSS_CHANNEL_ID={RSS_CHANNEL_ID or '❌ не задан'}\n"
-        f"RSS_POLL_SECONDS={RSS_POLL_SECONDS}\n"
-        f"RSS_STATE_FILE={RSS_STATE_FILE}"
     )
 
 async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -516,7 +409,6 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("ping", cmd_ping))
-    app.add_handler(CommandHandler("rssstatus", cmd_rssstatus))
     app.add_handler(CommandHandler("nick", cmd_nick))
 
     # /qrand
@@ -529,10 +421,6 @@ def main():
 
     # links
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_links), group=20)
-
-    # RSS auto-posts
-    if RSS_URL and RSS_CHANNEL_ID:
-        app.job_queue.run_repeating(rss_tick, interval=RSS_POLL_SECONDS, first=10, name="rss_tick")
 
     log.info("Bot started.")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
