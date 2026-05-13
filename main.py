@@ -30,6 +30,7 @@ from telegram.ext import (
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
+INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "cookies.txt").strip()
 
 RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
@@ -82,7 +83,7 @@ def ytdlp_options(outtmpl: str, url: str) -> dict:
     if "tiktok.com" in url:
         fmt = "best[ext=mp4]/best"
 
-    return {
+    opts = {
         "outtmpl": outtmpl,
         "noplaylist": True,
         "quiet": True,
@@ -95,6 +96,13 @@ def ytdlp_options(outtmpl: str, url: str) -> dict:
         "overwrites": True,
         "restrictfilenames": False,
     }
+
+    # Для Instagram reels, которые доступны только залогиненным:
+    # положи cookies.txt рядом с main.py или укажи путь через INSTAGRAM_COOKIES_FILE
+    if "instagram.com" in url and INSTAGRAM_COOKIES_FILE and Path(INSTAGRAM_COOKIES_FILE).exists():
+        opts["cookiefile"] = INSTAGRAM_COOKIES_FILE
+
+    return opts
 
 def pick_downloaded_files(folder: Path) -> List[Path]:
     files = []
