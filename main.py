@@ -31,6 +31,8 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "cookies.txt").strip()
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "").strip()
+WEATHER_CITY = "Klaipeda,LT"
 
 RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
@@ -167,7 +169,7 @@ async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Бот работает 😎\n"
-        "Команды: /rules /ping /nick\n"
+        "Команды: /rules /ping /nick /pogoda\n"
         f"/qrand удаляется через {DELETE_QRAND_AFTER_SECONDS} сек."
     )
 
@@ -179,6 +181,49 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         f"pong ✅\nchat_type={chat.type}\nchat_id={chat.id}"
     )
+
+async def cmd_pogoda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+
+    if not WEATHER_API_KEY:
+        await msg.reply_text("❌ Не задан WEATHER_API_KEY")
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={
+                    "q": WEATHER_CITY,
+                    "appid": WEATHER_API_KEY,
+                    "units": "metric",
+                    "lang": "ru",
+                },
+            )
+
+        if r.status_code != 200:
+            await msg.reply_text("❌ Не смог получить погоду для Клайпеды.")
+            return
+
+        data = r.json()
+
+        temp = round(data["main"]["temp"])
+        feels = round(data["main"]["feels_like"])
+        desc = data["weather"][0]["description"]
+        humidity = data["main"]["humidity"]
+        wind = data["wind"]["speed"]
+
+        await msg.reply_text(
+            f"🌦 Погода в Клайпеде\n"
+            f"🌡 Температура: {temp}°C\n"
+            f"🤔 Ощущается как: {feels}°C\n"
+            f"☁️ Состояние: {desc}\n"
+            f"💧 Влажность: {humidity}%\n"
+            f"💨 Ветер: {wind} м/с"
+        )
+
+    except Exception as e:
+        await msg.reply_text(f"❌ Ошибка погоды.\nТех: {e}")
 
 async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -409,6 +454,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("ping", cmd_ping))
+    app.add_handler(CommandHandler("pogoda", cmd_pogoda))
     app.add_handler(CommandHandler("nick", cmd_nick))
 
     # /qrand
