@@ -202,8 +202,12 @@ async def cmd_pogoda(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         if r.status_code != 200:
-            await msg.reply_text("❌ Не смог получить погоду для Клайпеды.")
-            return
+    await msg.reply_text(
+        f"❌ Не смог получить погоду для Клайпеды.\n"
+        f"Код: {r.status_code}\n"
+        f"Ответ: {r.text[:300]}"
+    )
+    return
 
         data = r.json()
 
