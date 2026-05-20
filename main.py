@@ -30,6 +30,7 @@ from telegram.ext import (
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
+KAZIK_DELETE_SECONDS = int(os.getenv("KAZIK_DELETE_SECONDS", "10"))
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "cookies.txt").strip()
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "").strip()
 WEATHER_CITY = "Klaipeda,LT"
@@ -169,8 +170,9 @@ async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Бот работает 😎\n"
-        "Команды: /rules /ping /nick /pogoda\n"
-        f"/qrand удаляется через {DELETE_QRAND_AFTER_SECONDS} сек."
+        "Команды: /rules /ping /nick /pogoda /kazik\n"
+        f"/qrand удаляется через {DELETE_QRAND_AFTER_SECONDS} сек.\n"
+        f"/kazik удаляется через {KAZIK_DELETE_SECONDS} сек."
     )
 
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,6 +292,48 @@ async def cmd_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await msg.reply_text(f"❌ Не получилось поставить ник.\nТех: {e}")
+# =========================
+# /kazik slot
+# =========================
+async def delete_specific_message_job(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    chat_id = job.data["chat_id"]
+    message_id = job.data["message_id"]
+    await safe_delete_message(context, chat_id, message_id)
+
+async def cmd_kazik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+
+    # Удаляем саму команду
+    context.job_queue.run_once(
+        delete_specific_message_job,
+        when=KAZIK_DELETE_SECONDS,
+        data={"chat_id": msg.chat_id, "message_id": msg.message_id},
+        name=f"del_kazik_cmd_{msg.chat_id}_{msg.message_id}",
+    )
+
+    slot_msg = await msg.reply_dice(emoji="🎰")
+
+    # Удаляем слот через несколько секунд
+    context.job_queue.run_once(
+        delete_specific_message_job,
+        when=KAZIK_DELETE_SECONDS,
+        data={"chat_id": slot_msg.chat_id, "message_id": slot_msg.message_id},
+        name=f"del_kazik_slot_{slot_msg.chat_id}_{slot_msg.message_id}",
+    )
+
+    # Значение 64 в Telegram slots = jackpot
+    if getattr(slot_msg.dice, "value", 0) == 64:
+        funny = await msg.reply_text("💸 Джекпот, братан. Казик тебя любит 😎")
+        context.job_queue.run_once(
+            delete_specific_message_job,
+            when=KAZIK_DELETE_SECONDS,
+            data={"chat_id": funny.chat_id, "message_id": funny.message_id},
+            name=f"del_kazik_funny_{funny.chat_id}_{funny.message_id}",
+        )
+
 # =========================
 # /qrand delete
 # =========================
@@ -459,6 +503,7 @@ def main():
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("ping", cmd_ping))
     app.add_handler(CommandHandler("pogoda", cmd_pogoda))
+    app.add_handler(CommandHandler("kazik", cmd_kazik))
     app.add_handler(CommandHandler("nick", cmd_nick))
 
     # /qrand
