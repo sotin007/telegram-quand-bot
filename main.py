@@ -38,14 +38,14 @@ WELCOME_STICKER_ID = "CAACAgIAAxkBAAEEFg9qDb2kMNZf8ci_88xv68SkC64n7QACKSMAAr4_2E
 OPA_MEDIA_FILE = os.getenv("OPA_MEDIA_FILE", "бригада-саша-белый.mp4").strip()
 
 RULES_TEXT = (
-    "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\\n\\n"
-    "🤩🥺Наши правила:🥺🤩\\n"
-    "😖🤬Без политики! 🤬😣\\n"
-    "😶‍🌫️🤯😳Не обижать друг друга!😳🤯😶‍🌫️\\n\\n"
-    "Так же наши команды:\\n"
-    "kazik - Поиграть в казино и тупо залутать победу\\n"
-    "pogoda - Чисто узнать погоду в клп\\n"
-    "nick - Выбрать себе любой ник\\n"
+    "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\n\n"
+    "🤩🥺Наши правила:🥺🤩\n"
+    "😖🤬Без политики! 🤬😣\n"
+    "😶‍🌫️🤯😳Не обижать друг друга!😳🤯😶‍🌫️\n\n"
+    "Так же наши команды:\n"
+    "kazik - Поиграть в казино и тупо залутать победу\n"
+    "pogoda - Чисто узнать погоду в клп\n"
+    "nick - Выбрать себе любой ник\n"
     "rules - Вспомнить правила"
 )
 
@@ -367,8 +367,8 @@ async def on_opa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    text = (msg.text or "").strip().lower()
-    if text != "опа":
+    t = (msg.text or "").strip().lower()
+    if t != "опа":
         return
 
     try:
@@ -386,21 +386,8 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.new_chat_members:
         return
 
-    mentions = ", ".join([u.mention_html() for u in msg.new_chat_members])
-
-    try:
-        await context.bot.send_sticker(
-            chat_id=msg.chat_id,
-            sticker=WELCOME_STICKER_ID,
-        )
-    except Exception as e:
-        log.warning("Welcome sticker send failed: %s", e)
-
-    await context.bot.send_message(
-        chat_id=msg.chat_id,
-        text=f"{RULES_TEXT}\n\n👋 Привет, {mentions}!",
-        parse_mode=ParseMode.HTML,
-    )
+    names = ", ".join([u.full_name for u in msg.new_chat_members])
+    await msg.reply_text(f"{RULES_TEXT}\n\n👋 Привет, {names}!")
 
 async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
