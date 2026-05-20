@@ -34,6 +34,8 @@ KAZIK_DELETE_SECONDS = int(os.getenv("KAZIK_DELETE_SECONDS", "10"))
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "cookies.txt").strip()
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "").strip()
 WEATHER_CITY = "Klaipeda,LT"
+WELCOME_STICKER_ID = "CAACAgIAAxkBAAEEFg9qDb2kMNZf8ci_88xv68SkC64n7QACKSMAAr4_2EpqMuRzQ8fnnTsE"
+OPA_MEDIA_FILE = os.getenv("OPA_MEDIA_FILE", "бригада-саша-белый.mp4").strip()
 
 = '''RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\\n\\n"
@@ -358,6 +360,25 @@ async def on_qrand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
+# OPA media
+# =========================
+async def on_opa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+
+    text = (msg.text or "").strip().lower()
+    if text != "опа":
+        return
+
+    try:
+        if OPA_MEDIA_FILE and Path(OPA_MEDIA_FILE).exists():
+            with open(OPA_MEDIA_FILE, "rb") as f:
+                await context.bot.send_animation(chat_id=msg.chat_id, animation=f)
+    except Exception as e:
+        log.warning("OPA media send failed: %s", e)
+
+# =========================
 # WELCOME / LEFT / BAN
 # =========================
 async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -365,8 +386,21 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.new_chat_members:
         return
 
-    names = ", ".join([u.full_name for u in msg.new_chat_members])
-    await msg.reply_text(f"{RULES_TEXT}\n\n👋 Привет, {names}!")
+    mentions = ", ".join([u.mention_html() for u in msg.new_chat_members])
+
+    try:
+        await context.bot.send_sticker(
+            chat_id=msg.chat_id,
+            sticker=WELCOME_STICKER_ID,
+        )
+    except Exception as e:
+        log.warning("Welcome sticker send failed: %s", e)
+
+    await context.bot.send_message(
+        chat_id=msg.chat_id,
+        text=f"{RULES_TEXT}\n\n👋 Привет, {mentions}!",
+        parse_mode=ParseMode.HTML,
+    )
 
 async def on_left_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -518,6 +552,9 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members), group=10)
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member), group=10)
     app.add_handler(CallbackQueryHandler(on_ban_callback, pattern=f"^{BAN_PREFIX}"), group=10)
+
+    # opa
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_opa), group=15)
 
     # links
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_links), group=20)
