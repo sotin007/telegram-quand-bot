@@ -37,7 +37,7 @@ WEATHER_CITY = "Klaipeda,LT"
 WELCOME_STICKER_ID = "CAACAgIAAxkBAAEEFg9qDb2kMNZf8ci_88xv68SkC64n7QACKSMAAr4_2EpqMuRzQ8fnnTsE"
 OPA_MEDIA_FILE = os.getenv("OPA_MEDIA_FILE", "бригада-саша-белый.mp4").strip()
 
-= '''RULES_TEXT = (
+RULES_TEXT = (
     "😼😳😨🤨Добро пожаловать в наш клаб хаус🤨😨😳😼\\n\\n"
     "🤩🥺Наши правила:🥺🤩\\n"
     "😖🤬Без политики! 🤬😣\\n"
