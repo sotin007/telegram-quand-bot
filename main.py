@@ -26,7 +26,7 @@ from telegram.ext import (
 )
 
 # =========================
-# CONFIG
+# CONFIG!
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DELETE_QRAND_AFTER_SECONDS = int(os.getenv("DELETE_QRAND_AFTER_SECONDS", "30"))
